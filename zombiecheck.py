@@ -820,23 +820,26 @@ def decide(sig, ts, today, mode="companies"):
     elif state == "blocked":
         bits.append("site blocked automated fetch (unverified)")
     score = round(100 * pts / den) if den else 0
-    if a is None and soc_iso is None and not n and state == "live":
-        # nothing dated anywhere: we cannot tell. Say so instead of guessing "zombie".
-        return ("unclear", min(score, 45), "low", "; ".join(bits + ["live site but no dated activity found: cannot tell"]), overall, last_sig)
     ages = [x for x in (a, s if soc_w == 1.0 else None) if x is not None]  # newest dated thing we verified ourselves
     newest = min(ages) if ages else None
+    NO_DATES = "no dated activity found; not evidence of closure"
+    rest = [b_ for b_ in bits if b_ != "no dated update found on checked pages"]
+    if newest is None and not (n and n > 0) and state in ("live", "blocked"):
+        # nothing dated anywhere: absence of dates is not evidence of closure
+        return ("unclear", min(score, 45), "low", "; ".join([NO_DATES] + rest), overall, last_sig)
     if newest is not None and newest > 730 and not (n and n > 0):
-        if state == "live" and su in ("works", "unclear") and newest <= 1095:
-            score = min(score, 45)  # old newest date, but the site loads and takes sign-ups: weaker than a zombie
-            bits.append("newest dated item is over 2 years old (site still live)")
-        else:
-            score = min(score, 25)
-            bits.append("nothing newer than 2 years")
+        score = min(score, 25)
+        bits.append(f"newest dated activity is {newest} days old (over 730)")
     v = "alive" if score >= 60 else "slowing down" if score >= 30 else "zombie"
-    if v == "zombie" and state == "live" and newest is not None and newest <= 730 and not any(
-            f in sig.get("flags", []) for f in ("shutdown_notice", "acquisition_notice")):
-        v = "slowing down"  # a newest dated item under 2 years old is not enough evidence to call a live site a zombie
-        bits.append("newest dated item under 2 years old")
+    if v == "zombie" and not (newest is not None and newest > 730):
+        # not a hard gate (those returned above) and no dated signal older than 730 days: cannot call it a zombie
+        if newest is None:
+            return ("unclear", min(score, 45), "low", "; ".join([NO_DATES] + rest), overall, last_sig)
+        v = "slowing down"
+        bits.append("newest dated activity is under 730 days old")
+    if v == "zombie" and any(f.startswith("moved_to:") for f in sig.get("flags", [])):
+        v = "unclear"  # same brand lives on at a new domain; the old domain's stale dates prove nothing
+        bits.append("brand continues at its new domain")
     recent = (a is not None and a <= 120) or (s is not None and s <= 120)
     if v == "alive" and not recent and not (n and n > 0):
         v = "slowing down"  # a site that loads and takes sign-ups but has published nothing in 4 months is not "alive"
@@ -844,10 +847,6 @@ def decide(sig, ts, today, mode="companies"):
     if v == "zombie" and any(f.startswith("moved_to:") for f in sig.get("flags", [])):
         v = "unclear"  # same brand lives on at a new domain; the old domain's stale dates prove nothing
         bits.append("brand continues at its new domain")
-    if v == "zombie" and ((a is None and state == "live") or state == "blocked"):
-        # an old social post alone, or a site that blocked us, is not enough to call anything dead
-        v = "unclear"
-        bits.append("no dated page activity to judge by" if state == "live" else "site blocked automated fetch; no proof either way")
     if "acquisition_notice" in sig.get("flags", []) and v == "alive" and (a is None or a > 120):
         v = "slowing down"
     conf = "high" if known >= 4 else "medium" if known == 3 else "low"

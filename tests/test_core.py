@@ -289,11 +289,11 @@ class FalseZombieFixes(unittest.TestCase):
     def test_year_old_newest_post_on_live_site_is_not_zombie(self):
         self.assertEqual(z.decide(self.sig(update=D(432)), None, T)[0], "slowing down")
 
-    def test_old_social_only_on_live_site_is_unclear(self):
-        self.assertEqual(z.decide(self.sig(social=D(1300), signup="works"), None, T)[0], "unclear")
+    def test_old_social_only_on_live_site_is_stale_evidence(self):
+        self.assertEqual(z.decide(self.sig(social=D(1300), signup="works"), None, T)[0], "zombie")
 
-    def test_blocked_site_is_never_zombie_without_proof(self):
-        self.assertEqual(z.decide(self.sig(site_state="blocked", social=D(250)), None, T)[0], "unclear")
+    def test_blocked_site_with_recent_social_is_not_zombie(self):
+        self.assertNotEqual(z.decide(self.sig(site_state="blocked", social=D(250)), None, T)[0], "zombie")
 
     def test_rebrand_with_stale_old_dates_is_not_zombie(self):
         self.assertEqual(z.decide(self.sig(update=D(1200), flags=["moved_to:currencybeacon.com"]), None, T)[0], "unclear")
@@ -303,6 +303,27 @@ class FalseZombieFixes(unittest.TestCase):
         self.assertEqual(z.analyze_site(tf, "Legal", "legal.io", T, do_search=False)["site_state"], "blocked")
         tf = FakeTF({"https://gone.io": {"error": "target_http_error", "status": 404}})
         self.assertEqual(z.analyze_site(tf, "Gone", "gone.io", T, do_search=False)["site_state"], "dead")
+
+    def test_zombie_needs_hard_gate_or_dated_signal_over_730_days(self):
+        # no dated activity at all -> unclear, with the required wording
+        v, _, conf, reason, *_ = z.decide(self.sig(signup="works"), None, T)
+        self.assertEqual((v, conf), ("unclear", "low"))
+        self.assertTrue(reason.startswith("no dated activity found; not evidence of closure"))
+        # newest dated item 729 days old: never zombie; 731 days old: zombie
+        self.assertNotEqual(z.decide(self.sig(update=D(729), signup="broken"), None, T)[0], "zombie")
+        self.assertEqual(z.decide(self.sig(update=D(731), signup="broken"), None, T)[0], "zombie")
+        # a stale verified social post is a dated signal too
+        self.assertEqual(z.decide(self.sig(social=D(800), signup="broken"), None, T)[0], "zombie")
+
+    def test_each_hard_gate_is_zombie_without_any_dates(self):
+        for st in ("dead", "parked", "absorbed", "shutdown", "archived"):
+            self.assertEqual(z.decide(self.sig(site_state=st), None, T)[0], "zombie", st)
+        ts = {"operating": False, "note": "shut down"}
+        self.assertEqual(z.decide(self.sig(), ts, T)[0], "zombie")
+
+    def test_never_zombie_from_a_low_score_alone(self):
+        for upd in (1, 100, 300, 600, 729):
+            self.assertNotEqual(z.decide(self.sig(update=D(upd), signup="broken"), None, T)[0], "zombie", upd)
 
     def test_real_zombies_still_zombies(self):
         self.assertEqual(z.decide(self.sig(update=D(1100), signup="broken"), None, T)[0], "zombie")

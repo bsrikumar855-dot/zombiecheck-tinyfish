@@ -11,9 +11,9 @@ before trusting a list. It also comes as an XLSX with hyperlinks and a filterabl
 Run on 2026-11-15 against live TinyFish. Full output: `full/o.csv`, `full/o.xlsx`, `full/o.report.html`.
 Command: `python zombiecheck.py tests/free-for-dev.csv -o full/o.csv --limit 600 --agent-budget 20 --ts-max-rows 120 --ts-validate 30`.
 
-**Verdicts (after the fixes below): 373 alive, 134 slowing down, 68 unclear, 25 zombie.**
+**Verdicts (after the fixes below): 372 alive, 129 slowing down, 46 unclear, 53 zombie.**
 `unclear` is a fourth verdict: the site is live but nothing on it is dated, so the tool says it cannot tell instead of guessing zombie.
-Confidence high / medium / low: 291 / 168 / 141. 599 of 600 rows have an evidence link.
+Confidence high / medium / low: 294 / 179 / 127. 599 of 600 rows have an evidence link.
 
 Method: all 600 rows checked with Fetch + Search; 20 unresolved rows escalated to the Agent API; TinySet used on the 120 hardest unresolved rows plus a 30-row random sample of confident rows as a cross-check.
 TinySet: 150 rows sent, 145 matched back to the input list, 5 unmatched in the first pass.
@@ -29,7 +29,7 @@ The first pass gave 181 zombies out of 600, which is too many for a maintained l
 - **Held up:** Reducto and Zoho Sign (alive, dated posts on the page), pyup.io, RequestBin, Dependabot, Keybase (dead or folded into an acquirer).
 
 Fixes: a shutdown phrase now counts only if it is about the site itself (first person, or its own brand in the same sentence), and "end of life" alone no longer counts; missing dates are treated as unknown rather than zero (live site with no dated activity anywhere becomes `unclear`); a live site whose newest dated item is under 2 years old is at most "slowing down"; a blocked site is never zombie without proof; a redirect to a sibling domain (sonarcloud.io to sonarsource.com, v0.dev to v0.app) is a move, not an acquisition. 9 new unit tests.
-Zombies went from 181 to 25. Two more fixes came from checking the last 19 zombies: only HTTP 404/410 count as a dead site (403/451 mean the site refused us), and a rebranded site (same brand at a new domain) is never zombie from the old domain's stale dates.
+Final rule (recomputed from saved state, no new network or TinySet calls): **a zombie needs either a hard gate (dead 404/410/unreachable, parked, shutdown notice about the site itself, archived repo, redirect to an unrelated domain, TinySet-reported shutdown) or a dated activity signal older than 730 days.** A live site with no dated activity at all is `unclear`, with the reason "no dated activity found; not evidence of closure". Zombies went from 181 to 25 under the earlier softer rules, then to 53 under this rule, because a verified social post older than 730 days now counts as stale evidence: about 26 sites whose only dated item is an old social post (for example twist.com, MockAPI, Bookings) flipped from `unclear` to `zombie`. I have not hand-checked those 26; at least twist.com is a live, maintained product, so treat them as the weakest zombies. Two earlier fixes came from checking the last 19 zombies: only HTTP 404/410 count as a dead site (403/451 mean the site refused us), and a rebranded site (same brand at a new domain) is never zombie from the old domain's stale dates.
 
 **Second spot-check: every one of the 28 zombies left after the first round was re-fetched** (9 + 19 sites). Of those, 5 were evidence-backed (pyup.io, Dependabot and RequestBin redirect into a different product; Keybase and TestTLS are reported shut down), 3 were wrong or doubtful (CurrencyScoop is alive as currencybeacon.com, Invantive Cloud returned HTTP 451 (blocked, not gone), logtail.com became Better Stack), and about 12 are live sites with no recent dated sign of life (for example Parseur, Pixela, RocketGit, Assertible, Sofodata), where "zombie" means "no recent dated activity found", not "proven dead". The two fixes above removed the wrong ones; after them 25 zombies remain. A few (Compare JSON, Engage) rest on a fetch error or an unverified TinySet claim. Treat zombies as leads to check through the evidence link.
 
