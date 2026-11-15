@@ -11,14 +11,14 @@ before trusting a list. It also comes as an XLSX with hyperlinks and a filterabl
 Run on 2026-11-15 against live TinyFish. Full output: `full/o.csv`, `full/o.xlsx`, `full/o.report.html`.
 Command: `python zombiecheck.py tests/free-for-dev.csv -o full/o.csv --limit 600 --agent-budget 20 --ts-max-rows 120 --ts-validate 30`.
 
-**Verdicts (after the fixes below): 373 alive, 132 slowing down, 67 unclear, 28 zombie.**
+**Verdicts (after the fixes below): 373 alive, 134 slowing down, 68 unclear, 25 zombie.**
 `unclear` is a fourth verdict: the site is live but nothing on it is dated, so the tool says it cannot tell instead of guessing zombie.
-Confidence high / medium / low: 289 / 171 / 140. 599 of 600 rows have an evidence link.
+Confidence high / medium / low: 291 / 168 / 141. 599 of 600 rows have an evidence link.
 
 Method: all 600 rows checked with Fetch + Search; 20 unresolved rows escalated to the Agent API; TinySet used on the 120 hardest unresolved rows plus a 30-row random sample of confident rows as a cross-check.
 TinySet: 150 rows sent, 145 matched back to the input list, 5 unmatched in the first pass.
 Cross-check: 28 of 30 sampled rows agree with the Fetch/Search verdict (1 had no TinySet answer, counted as disagreement). This compares the tool with TinySet, not with ground truth. The first pass, before the fixes, scored 25 of 30.
-Not covered by TinySet: about 180 unresolved rows were over the 120-row budget, and 30 rows that only became low confidence after the fixes were not sent (I did not approve more TinySet spend). They keep their Fetch/Search verdict and a lower confidence label.
+Not covered by TinySet: about 180 unresolved rows were over the 120-row budget, and 33 rows that only became low confidence after the fixes were not sent (I did not approve more TinySet spend). They keep their Fetch/Search verdict and a lower confidence label.
 Cost: not stated here. The wallet balance did not change during the run, which I cannot explain; check the TinyFish usage page.
 
 ### What the hand-check found (and what I changed)
@@ -29,9 +29,9 @@ The first pass gave 181 zombies out of 600, which is too many for a maintained l
 - **Held up:** Reducto and Zoho Sign (alive, dated posts on the page), pyup.io, RequestBin, Dependabot, Keybase (dead or folded into an acquirer).
 
 Fixes: a shutdown phrase now counts only if it is about the site itself (first person, or its own brand in the same sentence), and "end of life" alone no longer counts; missing dates are treated as unknown rather than zero (live site with no dated activity anywhere becomes `unclear`); a live site whose newest dated item is under 2 years old is at most "slowing down"; a blocked site is never zombie without proof; a redirect to a sibling domain (sonarcloud.io to sonarsource.com, v0.dev to v0.app) is a move, not an acquisition. 9 new unit tests.
-Zombies went from 181 to 28.
+Zombies went from 181 to 25. Two more fixes came from checking the last 19 zombies: only HTTP 404/410 count as a dead site (403/451 mean the site refused us), and a rebranded site (same brand at a new domain) is never zombie from the old domain's stale dates.
 
-**Second spot-check of the remaining zombies (9 sites re-fetched).** 4 were backed by evidence (redirect to the acquirer or a sunset notice: pyup.io, RequestBin, Dependabot, Keybase). 1 is probably wrong (Calendarific: a live product page with 2026 dates). The other 4 (Parseur, Pixela, Scaledrone, Webpushr, plus Gemfury and Hound as live pages) load fine and have no recent dated item, so "zombie" there means "no recent dated sign of life", not "proven dead". Treat the 28 as leads to check through the evidence link. The remaining 19 zombies were not hand-checked.
+**Second spot-check: every one of the 28 zombies left after the first round was re-fetched** (9 + 19 sites). Of those, 5 were evidence-backed (pyup.io, Dependabot and RequestBin redirect into a different product; Keybase and TestTLS are reported shut down), 3 were wrong or doubtful (CurrencyScoop is alive as currencybeacon.com, Invantive Cloud returned HTTP 451 (blocked, not gone), logtail.com became Better Stack), and about 12 are live sites with no recent dated sign of life (for example Parseur, Pixela, RocketGit, Assertible, Sofodata), where "zombie" means "no recent dated activity found", not "proven dead". The two fixes above removed the wrong ones; after them 25 zombies remain. A few (Compare JSON, Engage) rest on a fetch error or an unverified TinySet claim. Treat zombies as leads to check through the evidence link.
 
 ## How TinySet is used (and the other three endpoints)
 | endpoint | role | why it is not padding |

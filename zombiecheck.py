@@ -431,7 +431,7 @@ def analyze_site(tf, name, url, today, do_search=True):
                 r, base = r2, alt
             else:
                 c2 = r2.get("error")
-                gone = c2 in ("target_unreachable", "invalid_url", "page_not_found") or (c2 == "target_http_error" and (r2.get("status") or 404) < 500)
+                gone = c2 in ("target_unreachable", "invalid_url", "page_not_found") or (c2 == "target_http_error" and r2.get("status") in (404, 410))  # 403/451/429 etc. mean "refused us", not "gone"
                 out["site_state"] = "dead" if gone else "blocked"
                 flags.append(f"fetch_{c2}")
                 if out["site_state"] == "dead":
@@ -841,6 +841,9 @@ def decide(sig, ts, today, mode="companies"):
     if v == "alive" and not recent and not (n and n > 0):
         v = "slowing down"  # a site that loads and takes sign-ups but has published nothing in 4 months is not "alive"
         bits.append("no dated activity in 120 days")
+    if v == "zombie" and any(f.startswith("moved_to:") for f in sig.get("flags", [])):
+        v = "unclear"  # same brand lives on at a new domain; the old domain's stale dates prove nothing
+        bits.append("brand continues at its new domain")
     if v == "zombie" and ((a is None and state == "live") or state == "blocked"):
         # an old social post alone, or a site that blocked us, is not enough to call anything dead
         v = "unclear"

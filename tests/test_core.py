@@ -295,6 +295,15 @@ class FalseZombieFixes(unittest.TestCase):
     def test_blocked_site_is_never_zombie_without_proof(self):
         self.assertEqual(z.decide(self.sig(site_state="blocked", social=D(250)), None, T)[0], "unclear")
 
+    def test_rebrand_with_stale_old_dates_is_not_zombie(self):
+        self.assertEqual(z.decide(self.sig(update=D(1200), flags=["moved_to:currencybeacon.com"]), None, T)[0], "unclear")
+
+    def test_http_451_is_blocked_not_dead(self):
+        tf = FakeTF({"https://legal.io": {"error": "target_http_error", "status": 451}})
+        self.assertEqual(z.analyze_site(tf, "Legal", "legal.io", T, do_search=False)["site_state"], "blocked")
+        tf = FakeTF({"https://gone.io": {"error": "target_http_error", "status": 404}})
+        self.assertEqual(z.analyze_site(tf, "Gone", "gone.io", T, do_search=False)["site_state"], "dead")
+
     def test_real_zombies_still_zombies(self):
         self.assertEqual(z.decide(self.sig(update=D(1100), signup="broken"), None, T)[0], "zombie")
         self.assertEqual(z.decide(self.sig(site_state="parked"), None, T)[0], "zombie")
