@@ -43,6 +43,8 @@ class Detectors(unittest.TestCase):
         tf = FakeTF({"https://tinyco.com": page("https://tinyco.com", "Enterprise suite " * 50, final="https://bigcorp.com/products")})
         s = z.analyze_site(tf, "TinyCo", "tinyco.com", T, do_search=False)
         self.assertEqual(s["site_state"], "absorbed")
+        self.assertEqual(z.decide(s, None, T)[0], "unclear")  # a bare redirect can't tell acquired from renamed
+        s["redirect_check"] = {"url": "https://news.example/tinyco-acquired", "snippet": "TinyCo was acquired by BigCorp"}
         self.assertEqual(z.decide(s, None, T)[0], "zombie")
 
     def test_rebrand_keeps_brand_not_zombie(self):
@@ -96,7 +98,7 @@ class RedirectRebrand(unittest.TestCase):
         tf = FakeTF({"https://oldco.com": page("https://oldco.com", "Enterprise cloud " * 300, final="https://bigcorp.com/")})
         s = z.analyze_site(tf, "Oldco", "oldco.com", T, do_search=False)
         self.assertEqual(s["site_state"], "absorbed")
-        self.assertEqual(z.decide(s, None, T)[0], "zombie")
+        self.assertEqual(z.decide(s, None, T)[0], "unclear")  # needs a news/landing-page corroboration to be a zombie
 
 
 class Verdict(unittest.TestCase):
@@ -348,7 +350,7 @@ class FalseZombieFixes(unittest.TestCase):
         self.assertNotEqual(z.decide(self.sig(social=D(800), signup="broken"), None, T)[0], "zombie")
 
     def test_each_hard_gate_is_zombie_without_any_dates(self):
-        for st in ("dead", "parked", "absorbed", "archived"):
+        for st in ("dead", "parked", "archived"):
             self.assertEqual(z.decide(self.sig(site_state=st), None, T)[0], "zombie", st)
         self.assertEqual(z.decide(self.sig(site_state="shutdown", flags=["shutdown_notice"]), None, T)[0], "zombie")
         ts = {"operating": False, "note": "shut down"}
@@ -436,6 +438,54 @@ class FalseZombieFixes(unittest.TestCase):
     def test_real_zombies_still_zombies(self):
         self.assertEqual(z.decide(stale_sig(1100), None, T)[0], "zombie")
         self.assertEqual(z.decide(self.sig(site_state="parked"), None, T)[0], "zombie")
+
+
+class RedirectCorroboration(unittest.TestCase):
+    base = {"site_state": "absorbed", "flags": ["redirects_to_unrelated:betterstack.com"], "evidence": [], "reason_bits": [],
+            "jobs": None, "signup": None, "update": None, "release": None, "news": None, "social": None, "final_url": "https://betterstack.com/"}
+
+    def test_uncorroborated_redirect_is_unclear_with_the_required_reason(self):
+        for rc in (None, {"url": None, "snippet": ""}):
+            sig = {**self.base, **({"redirect_check": rc} if rc is not None else {})}
+            v, _, conf, reason, *_ = z.decide(sig, None, T)
+            self.assertEqual((v, conf), ("unclear", "low"))
+            self.assertEqual(reason, "redirects to betterstack.com: acquired, renamed or merged; evidence can't tell which")
+
+    def test_corroborated_redirect_is_zombie_and_cites_the_url(self):
+        sig = {**self.base, "redirect_check": {"url": "https://news.example/acme-acquired", "snippet": "Acme was acquired by BigCo"}}
+        v, _, _, reason, *_ = z.decide(sig, None, T)
+        self.assertEqual(v, "zombie")
+        self.assertIn("https://news.example/acme-acquired", reason)
+
+    def test_blob_needs_acquired_wording_and_no_rename_wording(self):
+        toks = {"logtail"}
+        ok = [("Logtail was acquired by Better Stack", "https://n/1")]
+        self.assertEqual(z.corroborating_blob(ok, toks)[0], "https://n/1")
+        renamed = [("Logtail was acquired by Better Stack and is now called Better Stack Logs", "https://n/2")]
+        self.assertIsNone(z.corroborating_blob(renamed, toks))
+        formerly = [("Better Stack (formerly Logtail) merged with Uptime", "https://n/3")]
+        self.assertIsNone(z.corroborating_blob(formerly, toks))
+        other_brand = [("Dropbox acquired by Evil Corp", "https://n/4")]
+        self.assertIsNone(z.corroborating_blob(other_brand, toks))
+        self.assertIsNone(z.corroborating_blob([("Logtail raises a seed round", "https://n/5")], toks))
+
+    def test_corroborate_redirect_runs_one_news_search(self):
+        calls = []
+        class TFS:
+            def search(self, q, **kw):
+                calls.append((q, kw))
+                return [{"title": "Logtail acquired by Better Stack", "snippet": "", "url": "https://n/1", "date": D(100)}]
+        rc = z.corroborate_redirect(TFS(), "logtail.com", "https://logtail.com", T)
+        self.assertEqual(rc["url"], "https://n/1")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1].get("domain_type"), "news")
+        self.assertIn("acquired OR acquisition OR merged", calls[0][0])
+
+    def test_landing_page_acquired_wording_is_recorded_at_analysis_time(self):
+        body = "Welcome to BigCo. " + "x " * 300 + " Oldco was acquired by BigCo in 2024."
+        tf = FakeTF({"https://oldco.com": page("https://oldco.com", body, final="https://bigcorp.com/")})
+        s = z.analyze_site(tf, "oldco", "oldco.com", T, do_search=False)
+        self.assertEqual(s["site_state"], "live")  # brand on the landing page -> treated as a move/rebrand first
 
 
 if __name__ == "__main__":

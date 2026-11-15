@@ -32,6 +32,9 @@ for i, r in enumerate(res):
     elif st in GATE:
         fired = "hard gate: " + GATE[st]
         url = next((e["url"] for e in ev if e["signal"] in ("site", "site_agent", "archived")), r["zc_final_url"] or r["url"])
+        if st == "absorbed":
+            url = (sig.get("redirect_check") or {}).get("url") or url
+            fired = "hard gate: redirect to an unrelated domain, corroborated by acquired/merged wording (news or landing page)"
         if st == "dead":  # show the actual fetch failure behind "dead"
             fail = next((e["basis"] for e in sig.get("evidence", []) if e.get("signal") == "site" and "failed" in e.get("basis", "")), "")
             fired += f" [{fail or 'fetch failed'}; flags: {','.join(f for f in sig.get('flags', []) if f.startswith('fetch_')) or '-'}]"
@@ -49,7 +52,7 @@ for i, r in enumerate(res):
 
 with open(md, "w", encoding="utf-8", newline="\n") as f:
     f.write(f"# Zombie rows ({len(lines)} of {len(res)})\n\n")
-    f.write("Every row with verdict `zombie` in `full/o.csv`, with the rule that fired. Hard gates: dead (404/410/unreachable), parked, shutdown notice on the site itself, archived repo, redirect to an unrelated domain, TinySet/Agent-reported shutdown that the own site also confirms. Otherwise a zombie needs structured dated sources on the organisation's own domain or own GitHub repo, all older than 730 days: two independent ones, or one plus zero open jobs and sign-up not working; never social, news or third-party domains, never text-parsed dates, never dates before 2010.\n\n")
+    f.write("Every row with verdict `zombie` in `full/o.csv`, with the rule that fired. Hard gates: dead (404/410/unreachable), parked, shutdown notice on the site itself, archived repo, redirect to an unrelated domain that a news result or the landing page corroborates as acquired/merged (no renamed/formerly wording), TinySet/Agent-reported shutdown that the own site also confirms. Otherwise a zombie needs structured dated sources on the organisation's own domain or own GitHub repo, all older than 730 days: two independent ones, or one plus zero open jobs and sign-up not working; never social, news or third-party domains, never text-parsed dates, never dates before 2010.\n\n")
     f.write("| # | name | URL | what fired | date | evidence URL | evidence on own domain (Y/N) | confidence |\n|---|---|---|---|---|---|---|---|\n")
     for n, (nm, u, fired, d, ev_url, own, conf) in enumerate(lines, 1):
         esc = lambda x: str(x).replace("|", "/").replace("\n", " ")

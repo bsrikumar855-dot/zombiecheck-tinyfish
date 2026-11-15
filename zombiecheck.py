@@ -385,6 +385,31 @@ def brand_tokens(name, url):
     return {x for x in t if len(x) >= 3 or x == dom}
 
 
+ACQUIRED_RE = re.compile(r"(acquired by|has been acquired|was acquired|acquisition of|merged (into|with)|merges? (into|with)|joins? forces with|sold to|shut down after (the )?acquisition)", re.I)
+RENAMED_RE = re.compile(r"(renamed|rebrand|now called|now known as|formerly|previously known as|is now |has become|changed (its|our) name)", re.I)
+
+
+def corroborating_blob(blobs, toks):
+    """blobs: [(text, url)]. Returns (url, snippet) of the first blob that names this brand with acquired-by / merged-into wording and
+    NO renamed / now called / now known as / formerly wording in the same blob; else None."""
+    for text, url in blobs:
+        low = (text or "").lower()
+        if not any(t in low for t in toks):
+            continue
+        if ACQUIRED_RE.search(text) and not RENAMED_RE.search(text):
+            m = ACQUIRED_RE.search(text)
+            return url, text[max(0, m.start() - 60):m.end() + 60].replace("\n", " ")
+    return None
+
+
+def corroborate_redirect(tf, name, base, today):
+    """One Search (domain_type=news) for a redirect-gate row. Returns {'url','snippet'} or {'url': None}."""
+    res = tf.search(f'"{name}" acquired OR acquisition OR merged', domain_type="news")
+    blobs = [((x.get("title", "") or "") + " " + (x.get("snippet", "") or ""), x.get("url", "")) for x in res[:10]]
+    hit = corroborating_blob(blobs, brand_tokens(name, base))
+    return {"url": hit[0], "snippet": hit[1]} if hit else {"url": None, "snippet": ""}
+
+
 def resolve_url(tf, name):
     skip = ("linkedin.", "twitter.", "x.com", "facebook.", "wikipedia.", "crunchbase.", "youtube.", "instagram.", "reddit.", "github.com")
     for r in tf.search(f"{name} official website"):
@@ -461,6 +486,10 @@ def analyze_site(tf, name, url, today, do_search=True):
             else:
                 out["site_state"] = "absorbed"
                 flags.append(f"redirects_to_unrelated:{reg_domain(fh)}")
+                own_hit = corroborating_blob([(text[:20000], final)], toks)  # the landing page itself says acquired-by / merged-into
+                if own_hit:
+                    out["redirect_check"] = {"url": own_hit[0], "snippet": own_hit[1]}
+                    E.append(ev("redirect_own_page", None, own_hit[0], "landing page: " + own_hit[1]))
                 out["reason_bits"].append(f"redirects to unrelated {reg_domain(fh)} (acquired / domain reassigned)")
         if out["site_state"] == "live" and gh and ARCHIVED.search(text[:6000]):
             out["site_state"] = "archived"
@@ -827,7 +856,13 @@ def decide(sig, ts, today, mode="companies"):
     if state == "dead" and "fetch_invalid_url" in sig.get("flags", []) and not any(f in sig.get("flags", []) for f in ("fetch_target_unreachable", "fetch_page_not_found")):
         # the fetch API rejected the URL (invalid_url): that is not a 404/410 or a DNS failure, so it is not proof of closure
         return ("unclear", 20, "low", "fetch API rejected the URL (invalid_url); not proof of closure", overall, last_sig)
-    if state in ("dead", "parked", "absorbed", "shutdown", "archived"):
+    if state == "absorbed":
+        rc = sig.get("redirect_check") or {}
+        dom = next((f.split(":", 1)[1] for f in sig.get("flags", []) if f.startswith("redirects_to_unrelated:")), "") or reg_domain(urllib.parse.urlparse(sig.get("final_url") or "").netloc)
+        if not rc.get("url"):
+            return ("unclear", 15, "low", f"redirects to {dom}: acquired, renamed or merged; evidence can't tell which", overall, last_sig)
+        return ("zombie", 0, "high", f"redirects to unrelated {dom}; acquired/merged wording at {rc['url']}: {rc.get('snippet', '')}", overall, last_sig)
+    if state in ("dead", "parked", "shutdown", "archived"):
         # a TinySet note saying "rebranded to X" with a live verified update still gets a chance at not being a zombie
         return ("zombie", 0, "high" if state != "dead" else "medium", "; ".join(bits) or state, overall, last_sig if overall else "")
     if ts.get("operating") is False and ts.get("note") and re.search(r"(shut|acquired|parked|closed)", ts["note"], re.I) and not (last_iso and days_since(last_iso, today) <= 120):
@@ -1466,6 +1501,22 @@ def main(argv=None):
         ABORT.set()
         print("\ninterrupted - state saved, re-run the same command to resume", file=sys.stderr)
     det = db.get_all("det")
+
+    # phase 1c: a redirect to another domain is a zombie only if a news result (or the landing page) says acquired-by / merged-into
+    if a.mode == "companies" and not a.no_search and not ABORT.is_set():
+        todo_rc = [i for i, sg in det.items() if sg.get("site_state") == "absorbed" and "redirect_check" not in sg]
+        if todo_rc:
+            print(f"phase 1c: corroborating {len(todo_rc)} redirect rows with one news Search each", file=sys.stderr)
+        for i in todo_rc:
+            sg = det[i]
+            try:
+                rc = corroborate_redirect(tf, items[i][0], norm_url(items[i][1]), today)
+            except Fatal as e:
+                print("STOP:", e, file=sys.stderr); ABORT.set(); break
+            sg["redirect_check"] = rc
+            sg.setdefault("evidence", []).append(ev("redirect_news", None, rc["url"] or "", ("news: " + rc["snippet"]) if rc["url"] else "no acquired/merged news result for this brand"))
+            db.put("det", i, sg)
+        det = db.get_all("det")
 
     # phase 1b: escalate rows Fetch could not settle to a real browser (Agent API)
     if a.agent_budget and a.mode == "companies" and not ABORT.is_set():
