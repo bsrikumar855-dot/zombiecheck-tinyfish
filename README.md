@@ -66,12 +66,16 @@ signal expandable with links) and `<output>.summary.md`.
 - One row's exception never stops the run; 401/402/403 stop cleanly with state saved; 429/5xx retry with `Retry-After`/backoff.
 - Client-side limiters at the documented limits: Fetch 150 URLs/min, Search 30/min (`--fetch-per-min`, `--search-per-min`).
 
+## Cost
+
+Cost: all runs in this write-up (free-for-dev 600 rows, the 30-row test, the YC 500-row validation, 59 Agent browser checks, 150 TinySet rows) cost about $16 in total, measured as the wallet balance before and after ($47 to $31). Most of it is TinySet, which is why it is capped by --ts-max-rows. The per-row rate was not independently verified.
+
 ## Cost / limits (from the docs)
 Fetch is free up to 1,000 URLs/day; this tool uses ~6 per row, so 500 rows needs wallet balance (or run ~150 rows/day free). Search free to 12,000/day.
 TinySet is billed per row (about $0.10, the rate shown in the wallet) and only runs on unresolved rows, capped by `--ts-max-rows` (default 120 = about $12 at most). Runs take 5-20 min per batch. Use `--no-tinyset` for a Fetch+Search-only pass.
 
 ## Tested vs not tested
 Tested: 72 unit tests on the deterministic core (`python3 -m unittest tests/test_core.py`), full pipeline, resume after SIGKILL, job mode, 540-row run against `tests/mock_tinyfish.py` (a local fake of the four APIs + a fake web).
-**Live run:** 600 rows of free-for-dev against live TinyFish (results in `full/`, write-up in `SUBMISSION.md`). TinySet followed the fixed entity list (145 matched, 5 unmatched of 150 sent);
+**Live run:** 600 rows of free-for-dev against live TinyFish (results in `full/`, write-up in `SUBMISSION.md`). TinySet followed the fixed entity list (150 sent; 145 matched and 5 unmatched in the first pass, 145 matched and 2 unmatched in the final CSV with 3 rows relabelled);
 `--print-tinyset-spec` shows the spec. A hand spot-check of 5 verdicts found 3 wrong or doubtful (a shutdown false positive, "no dated activity" scored as zombie, undated "November 5" posts missed), so treat verdicts as leads to check via the evidence link, not as final.
 Known weak spots: social recency (X/LinkedIn are bot-walled), JS-only careers pages, `<time>`-less blogs fall back to text dates.

@@ -6,6 +6,10 @@ the page that proves that date, and every other signal with its link. It does th
 before trusting a list. It also comes as an XLSX with hyperlinks and a filterable HTML report.
 
 **Demo:** free-for-dev, a real GitHub "awesome" list of about 1,370 dev services, converted with `awesome_to_csv.py`. Run: `./demo.sh 600`.
+## Cost
+
+Cost: all runs in this write-up (free-for-dev 600 rows, the 30-row test, the YC 500-row validation, 59 Agent browser checks, 150 TinySet rows) cost about $16 in total, measured as the wallet balance before and after ($47 to $31). Most of it is TinySet, which is why it is capped by --ts-max-rows. The per-row rate was not independently verified.
+
 ## Live results (free-for-dev, first 600 rows)
 
 Run on 2026-11-15 against live TinyFish. Full output: `full/o.csv`, `full/o.xlsx`, `full/o.report.html`.
@@ -16,10 +20,9 @@ Command: `python zombiecheck.py tests/free-for-dev.csv -o full/o.csv --limit 600
 Confidence high / medium / low: 283 / 166 / 151. 599 of 600 rows have an evidence link.
 
 Method: all 600 rows checked with Fetch + Search; 20 unresolved rows escalated to the Agent API; TinySet used on the 120 hardest unresolved rows plus a 30-row random sample of confident rows as a cross-check.
-TinySet: 150 rows sent, 145 matched back to the input list, 5 unmatched in the first pass.
+TinySet: 150 rows sent, 145 matched back to the input list, 5 unmatched in the first pass (the final CSV shows 2 unmatched and 3 relabelled; see below).
 Cross-check: 29 of 30 sampled rows agree with the Fetch/Search verdict (1 had no TinySet answer, counted as disagreement). This compares the tool with TinySet, not with ground truth. The first pass, before the fixes, scored 25 of 30; the number moves with the verdict rules because only the tool's side changes.
-Not covered by TinySet: about 180 unresolved rows were over the 120-row budget, and 33 rows that only became low confidence after the fixes were not sent (I did not approve more TinySet spend). They keep their Fetch/Search verdict and a lower confidence label.
-Cost: not stated here. The wallet balance did not change during the run, which I cannot explain; check the TinyFish usage page.
+`zc_tinyset` in `full/o.csv` (600 rows): matched 145, unmatched 2, skipped_resolved 236, skipped_budget 184, not_run 33. 150 rows were actually sent to TinySet (5 collected batches in the saved state); the CSV labels 3 of those as skipped_budget because the labels were recomputed after the verdict rules changed, so the sent rows read as 145 matched, 2 unmatched, 3 relabelled. Unresolved but not sent to TinySet: 214 rows = 181 over the 120-row budget (184 labelled skipped_budget minus those 3) + 33 not_run (rows that only became low confidence after the later rules; I did not approve more TinySet spend). They keep their Fetch/Search verdict and a lower confidence label.
 
 ### What the hand-check found (and what I changed)
 The first pass gave 181 zombies out of 600, which is too many for a maintained list. I checked 5 high-confidence rows and then 13 of the zombies against their live pages:
@@ -39,7 +42,7 @@ The five redirect rows (RequestBin, RunMyJob, Dependabot, pyup.io, logtail.com) 
 Compare JSON: the Fetch API answered HTTP 200 with `invalid_url` for https, www and http forms and no status field, so no 404/410; it is `unclear`.
 Two earlier fixes (before this rule) came from checking the last 19 zombies: only HTTP 404/410 count as a dead site (403/451 mean the site refused us), and a rebranded site (same brand at a new domain) is never zombie from the old domain's stale dates.
 
-**Second spot-check: every one of the 28 zombies left after the first round was re-fetched** (9 + 19 sites). Of those, 5 were evidence-backed (pyup.io, Dependabot and RequestBin redirect into a different product; Keybase and TestTLS are reported shut down), 3 were wrong or doubtful (CurrencyScoop is alive as currencybeacon.com, Invantive Cloud returned HTTP 451 (blocked, not gone), logtail.com became Better Stack), and about 12 are live sites with no recent dated sign of life (for example Parseur, Pixela, RocketGit, Assertible, Sofodata), where "zombie" means "no recent dated activity found", not "proven dead". The two fixes above removed the wrong ones; after them 25 zombies remain. A few (Compare JSON, Engage) rest on a fetch error or an unverified TinySet claim. Treat zombies as leads to check through the evidence link.
+**Second spot-check: every one of the 28 zombies left after the first round was re-fetched** (9 + 19 sites). Of those, 5 were evidence-backed (pyup.io, Dependabot and RequestBin redirect into a different product; Keybase and TestTLS are reported shut down), 3 were wrong or doubtful (CurrencyScoop is alive as currencybeacon.com, Invantive Cloud returned HTTP 451 (blocked, not gone), logtail.com became Better Stack), and about 12 are live sites with no recent dated sign of life (for example Parseur, Pixela, RocketGit, Assertible, Sofodata), where "zombie" meant "no recent dated activity found", not "proven dead" (a stricter later rule removed them as zombies; 1 zombie remains). The two fixes above removed the wrong ones; after them 25 zombies remained at that point (the later rules in this document leave 1). A few (Compare JSON, Engage) rest on a fetch error or an unverified TinySet claim. Treat zombies as leads to check through the evidence link.
 
 ## Validation on ground truth (YC company status)
 
@@ -69,7 +72,7 @@ The verdict rules were tuned on free-for-dev; this is a separate test set the ru
 | Juno College of Technology | http://junocollege.com | Active | Fetch API could not load the site (fetch_page_not_found) and a browser also failed: error page: Site not found. Well, this is awkward. The site you are looking for is not here. 404 Error. | http://junocollege.com |
 | Gamebytes | http://www.gamebytes.io | Active | Fetch API could not load the site (fetch_page_not_found) and a browser also failed: error page: Your connection is not private; net::ERR_CERT_DATE_INVALID | http://www.gamebytes.io |
 | Tall Poppy | https://tallpoppy.com | Active | Fetch API could not load the site (fetch_target_unreachable) and a browser also failed: error page: tallpoppy.com sent an invalid response. ERR_SSL_PROTOCOL_ERROR | https://tallpoppy.com |
-| Helicarrier (prev Buycoins) | https://helicarrier.studio | Active | Fetch API could not load the site (fetch_page_not_found) and a browser also failed: error page: Page not found. Looks like you’ve followed a broken link or entered a URL that doesn’t exist on this sit | https://helicarrier.studio |
+| Helicarrier (prev Buycoins) | https://helicarrier.studio | Active | Fetch API could not load the site (fetch_page_not_found) and a browser also failed: error page: Page not found. Looks like youâ€™ve followed a broken link or entered a URL that doesnâ€™t exist on this sit | https://helicarrier.studio |
 
 Reading it: the tool is precise but conservative. Its zombie calls are dead or parked sites, shutdown notices, or acquired-by redirects, but it calls only one in five Inactive companies a zombie, and abstains (unclear or slowing down) on three in four, because a company can stop operating while its website stays up and nothing on the site is dated. YC's status is a label, not a live check.
 
@@ -109,4 +112,4 @@ State lives in SQLite (`<out>.zc/state.db`): per-row results, TinySet dataset id
 ## Known limits (honest)
 Social recency is the weakest signal: X and LinkedIn are walled, so it is weighted 15 and marked unverified when only TinySet saw it. JS-only careers pages are escalated to Agent within the budget. TinySet is budgeted (`--ts-max-rows`, default 120 rows, about $0.10 each) and runs only on rows phase 1 could not settle, so it does not cover every row. `--no-tinyset` gives a Fetch+Search-only pass.
 
-After the fixes: a live site with undated pages is `unclear` (not guessed), and "zombie" for an old, undated or low-activity site means no recent dated sign of life, not proven dead. Company-wide blogs flatter products inside big companies (Zoho Sign, Azure App Service). 151+ unresolved rows had no TinySet pass.
+Zombie requires a hard gate (dead and browser-confirmed, parked, shutdown notice, archived repo, corroborated acquisition) or own-site dated evidence over 2 years old. Weaker evidence gives slowing down or unclear. Social and news dates never make a zombie. A live site with undated pages is `unclear` (not guessed). Company-wide blogs flatter products inside big companies (Zoho Sign, Azure App Service). 214 unresolved rows had no TinySet pass (181 over the 120-row budget, 33 that became low confidence after the verdict rules changed); exact counts are in the Live results section.
