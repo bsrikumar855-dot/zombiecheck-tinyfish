@@ -148,6 +148,16 @@ class AgentRun(unittest.TestCase):
         self.assertTrue(calls[0][1].endswith("/v1/automation/run-async"))
         self.assertTrue(calls[1][1].endswith("/v1/runs/r1"))
 
+    def test_start_body_has_no_beta_only_max_steps(self):
+        sent = []
+        def fake_http(method, url, key, body=None, params=None, timeout=150, retries=5):
+            sent.append(body); return (200, {"run_id": "r"}) if method == "POST" else (200, {"status": "COMPLETED", "result": {}})
+        z.http, old = fake_http, z.http
+        self.addCleanup(setattr, z, "http", old)
+        z.TF("k").agent_run("https://a.io", "g", steps=30, poll=0)
+        self.assertNotIn("max_steps", sent[0]["agent_config"])
+        self.assertIn("max_duration_seconds", sent[0]["agent_config"])
+
     def test_failed_run_is_not_success(self):
         tf, _ = self._tf([(200, {"run_id": "r1"}), (200, {"status": "FAILED", "result": {"ok": 1}})])
         self.assertIsNone(tf.agent_run("https://a.io", "g", poll=0))

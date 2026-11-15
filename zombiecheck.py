@@ -152,7 +152,7 @@ class TF:
     def agent_run(self, url, goal, steps=20, secs=120, poll=3.0):
         """Async run (/run-async) + poll GET /v1/runs/{id}. Returns the result only for a COMPLETED run, else None."""
         st, js = http("POST", AGENT_URL + "/v1/automation/run-async", self.key,
-                      {"url": url, "goal": goal, "agent_config": {"max_steps": steps, "max_duration_seconds": secs}},
+                      {"url": url, "goal": goal, "agent_config": {"max_duration_seconds": secs}},  # max_steps is beta-only (403 without it)
                       timeout=60, retries=3)
         self._fatal(st, js, "agent")
         run_id = js.get("run_id") if st == 200 else None
@@ -1365,14 +1365,21 @@ def main(argv=None):
         cand = [i for i in cand if not det[i].get("agent_checked")][:max(0, a.agent_budget - done_ag)]
         if cand:
             print(f"phase 1b: Agent browser check on {len(cand)} unresolved rows (budget {a.agent_budget})", file=sys.stderr)
+        agent_stop = threading.Event()
+
         def ag(i):
-            if ABORT.is_set():
+            if ABORT.is_set() or agent_stop.is_set():
                 return
             s = det[i]
             try:
                 apply_agent(s, agent_probe(tf, items[i][0], s.get("final_url") or norm_url(items[i][1])), today)
-            except Fatal:
-                ABORT.set(); return
+            except Fatal as e:
+                print("Agent stage stopped:", e, file=sys.stderr)
+                if re.search(r"40[12]", str(e)):
+                    ABORT.set()      # bad key / empty wallet: nothing else can run either
+                else:
+                    agent_stop.set()  # e.g. 403: skip the Agent step, keep going with TinySet
+                return
             except Exception as e:  # noqa
                 s.setdefault("flags", []).append(f"agent_error:{type(e).__name__}")
             s["agent_checked"] = True
@@ -1434,9 +1441,11 @@ def write_partial(a, out_path, header, rows, db, today, final=False):
         names = {i: (rows[i][ni].strip() if ni < len(rows[i]) else "", "") for i in range(len(rows))}
         claims = ts_collect(db, names) if db.q("SELECT 1 FROM batches WHERE data IS NOT NULL") else {}
     results = {}
+    sent = {i for (j,) in db.q("SELECT idxs FROM batches WHERE status IN ('collected','partial')") for i in json.loads(j)}
     skip = json.loads(db.meta("ts_skip") or "{}") if a.mode == "companies" and not a.no_tinyset else {}
     for i, sig in det.items():
-        results[i] = build_row(i, sig, claims.get(i) if (final or i in ver) else None, ver.get(i), today, a.mode, skip.get(str(i)))
+        results[i] = build_row(i, sig, claims.get(i) if (final or i in ver) else None, ver.get(i), today, a.mode,
+                               skip.get(str(i)) or ("unmatched" if final and i in sent and i not in claims else None))
     write_csv(out_path, header, rows, results)
     if final:
         ni, ui = detect_cols(header, rows, a.name_col, a.url_col)
