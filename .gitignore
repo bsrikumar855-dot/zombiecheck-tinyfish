@@ -7,3 +7,7 @@ list.csv
 full/*.zc/
 full/*.log
 full/_*.txt
+yc_all.json
+yc/*.zc/
+yc/*.log
+full/_before.csv

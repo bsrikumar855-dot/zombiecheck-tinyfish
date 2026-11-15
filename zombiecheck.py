@@ -1315,6 +1315,10 @@ def build_row(i, sig, ts_claims, ver, today, mode, ts_skip=None, row_url=None):
     ev_txt = "\n".join(f"{e['signal']} | {e['date'] or '-'} | {e['url']} | {e['basis']}" for e in evid)
     prim = next((e["url"] for e in evid if last and e["date"] == last), None) \
         or next((e["url"] for e in evid if e["signal"] in ("site", "site_agent", "job_page", "status_agent")), "")
+    if v == "zombie" and sig.get("site_state") in ("dead", "parked", "absorbed", "shutdown", "archived"):
+        # a hard-gate verdict is proven by the site page itself (or the corroborating news/landing page), never by a social post
+        prim = next((e["url"] for e in evid if e["signal"] in ("redirect_news", "redirect_own_page")), None) \
+            or next((e["url"] for e in evid if e["signal"] in ("site", "site_agent", "status_agent", "archived")), prim)
     return {"zc_verdict": v, "zc_confidence": conf, "zc_score": score, "zc_last_activity_date": last, "zc_last_activity_source": last_sig,
             "zc_evidence": ev_txt, "zc_evidence_url": prim, "zc_reason": reason, "zc_flags": ",".join(sig.get("flags", [])), "zc_final_url": sig.get("final_url", ""),
             "zc_blog_date": sig.get("update") or "", "zc_release_date": sig.get("release") or "", "zc_news_date": sig.get("news") or "",

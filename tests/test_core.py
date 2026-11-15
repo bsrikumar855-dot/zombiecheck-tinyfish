@@ -435,6 +435,14 @@ class FalseZombieFixes(unittest.TestCase):
         self.assertIn("invalid_url", reason)
         self.assertEqual(z.decide(self.sig(site_state="dead", flags=["fetch_target_unreachable"]), None, T)[0], "zombie")
 
+    def test_hard_gate_evidence_url_is_the_site_not_a_social_post(self):
+        sig = {**self.sig(site_state="parked", final_url="https://oldco.com/", social=D(300)),
+               "evidence": [{"signal": "site", "date": "", "url": "https://oldco.com/", "basis": "live fetch ok, but classified parked"},
+                            {"signal": "social", "date": D(300), "url": "https://youtube.com/watch?v=x", "basis": "newest dated social search result"}]}
+        row = z.build_row(0, sig, None, None, T, "companies")
+        self.assertEqual(row["zc_verdict"], "zombie")
+        self.assertEqual(row["zc_evidence_url"], "https://oldco.com/")
+
     def test_real_zombies_still_zombies(self):
         self.assertEqual(z.decide(stale_sig(1100), None, T)[0], "zombie")
         self.assertEqual(z.decide(self.sig(site_state="parked"), None, T)[0], "zombie")

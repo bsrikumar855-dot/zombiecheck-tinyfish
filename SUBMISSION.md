@@ -41,6 +41,38 @@ Two earlier fixes (before this rule) came from checking the last 19 zombies: onl
 
 **Second spot-check: every one of the 28 zombies left after the first round was re-fetched** (9 + 19 sites). Of those, 5 were evidence-backed (pyup.io, Dependabot and RequestBin redirect into a different product; Keybase and TestTLS are reported shut down), 3 were wrong or doubtful (CurrencyScoop is alive as currencybeacon.com, Invantive Cloud returned HTTP 451 (blocked, not gone), logtail.com became Better Stack), and about 12 are live sites with no recent dated sign of life (for example Parseur, Pixela, RocketGit, Assertible, Sofodata), where "zombie" means "no recent dated activity found", not "proven dead". The two fixes above removed the wrong ones; after them 25 zombies remain. A few (Compare JSON, Engage) rest on a fetch error or an unverified TinySet claim. Treat zombies as leads to check through the evidence link.
 
+## Validation on ground truth (YC company status)
+
+The verdict rules were tuned on free-for-dev; this is a separate test set the rules never saw. Ground truth is YC's own status label for 500 companies from batches W12 to S19 (seeded sample, seed 42: 250 Inactive, 125 Acquired, 125 Active/Public; built by `make_yc_csv.py`, scored by `eval_yc.py`, full report and every zombie call with its evidence URL in `yc_eval.md`). Run: `python zombiecheck.py yc500.csv -o yc/o.csv --no-tinyset --agent-budget 20`. No verdict rule was changed for this test. The numbers below are copied unedited from `yc_eval.md`.
+
+### Tool verdict by YC status (count, % of that status)
+
+| YC status (rows) | alive | slowing down | unclear | zombie |
+|---|---|---|---|---|
+| Inactive (250) | 13 (5.2%) | 67 (26.8%) | 119 (47.6%) | 51 (20.4%) |
+| Acquired (125) | 26 (20.8%) | 34 (27.2%) | 43 (34.4%) | 22 (17.6%) |
+| Active/Public (125) | 61 (48.8%) | 39 (31.2%) | 21 (16.8%) | 4 (3.2%) |
+
+### Headline numbers
+
+- **(a) Recall:** 51 of 250 Inactive rows called zombie = **20.4%**.
+- **(b) Abstain:** 186 of 250 Inactive rows called unclear or slowing down = **74.4%** (unclear 119, slowing down 67). The remaining 13 (5.2%) were called alive.
+- **(c) False-zombie rate:** 4 of 125 Active/Public rows called zombie = **3.2%**.
+- **(d) Acquired rows:** 65 of 125 were zombie or unclear (22 zombie, 43 unclear); 18 of those were via a redirect to another domain (3 zombie, 15 unclear).
+
+### (c) Every Active/Public row the tool called zombie
+
+| name | URL | YC status | what fired | evidence URL |
+|---|---|---|---|---|
+| Juno College of Technology | http://junocollege.com | Active | site unreachable (page_not_found 404) | http://junocollege.com |
+| Gamebytes | http://www.gamebytes.io | Active | site unreachable (page_not_found 404) | http://www.gamebytes.io |
+| Tall Poppy | https://tallpoppy.com | Active | site unreachable (target_unreachable) | https://tallpoppy.com |
+| Helicarrier (prev Buycoins) | https://helicarrier.studio | Active | site unreachable (page_not_found 404) | https://helicarrier.studio |
+
+Reading it: the tool is precise but conservative. When it says zombie it is almost always a dead or parked site (the 77 zombie calls are dead 404/unreachable sites, parked domains, shutdown notices, or acquired-by redirects), but it calls only about one in five Inactive companies a zombie, and abstains (unclear or slowing down) on three in four, because a company can stop operating while its website stays up and nothing on the site is dated. The four false zombies are sites that are down right now: I re-fetched them (http, https and www) and each returns a 404 or is unreachable, so YC's "Active" label looks stale, but I cannot prove that from here. YC's status is a label, not a live check.
+
+Bug found and fixed during this test: for hard-gate zombies (parked, dead, shutdown, redirect), the `zc_evidence_url` column sometimes held a social post (a YouTube, LinkedIn or Instagram link) instead of the site page, because `build_row` first picked whichever evidence matched the "last activity" date. It now uses the site page (or the corroborating news / landing page for a redirect) for any hard-gate zombie. Verdicts and counts did not change; only the evidence link did. Regenerated from saved state with no network (`recompute_state.py`), and covered by a test. (`decide()` was not touched.)
+
 ## How TinySet is used (and the other three endpoints)
 | endpoint | role | why it is not padding |
 |---|---|---|
@@ -70,7 +102,7 @@ The verdict comes from a pure function (`decide()`), not an LLM, so judges can r
 | ghost jobs (`--mode jobs`) | 404/410, "no longer accepting", expired `validThrough`, redirect to the careers index, posting age |
 
 ## Scale and resume
-State lives in SQLite (`<out>.zc/state.db`): per-row results, TinySet dataset ids and verification results. SIGKILL mid-run, then re-run the same command, and it continues. TinySet runs are re-attached, not re-bought. A failing row never stops the run. 401/402/403 stop cleanly. 429/5xx retry with `Retry-After`. Client-side limits match the documented quotas. The same URL is fetched once per run. Tested: 66 unit tests, a 540-row end-to-end run with SIGKILL and resume against a local fake of all four APIs, and the live 600-row run above (resumed once after a bug fix).
+State lives in SQLite (`<out>.zc/state.db`): per-row results, TinySet dataset ids and verification results. SIGKILL mid-run, then re-run the same command, and it continues. TinySet runs are re-attached, not re-bought. A failing row never stops the run. 401/402/403 stop cleanly. 429/5xx retry with `Retry-After`. Client-side limits match the documented quotas. The same URL is fetched once per run. Tested: 67 unit tests, a 540-row end-to-end run with SIGKILL and resume against a local fake of all four APIs, and the live 600-row run above (resumed once after a bug fix).
 
 ## Known limits (honest)
 Social recency is the weakest signal: X and LinkedIn are walled, so it is weighted 15 and marked unverified when only TinySet saw it. JS-only careers pages are escalated to Agent within the budget. TinySet is budgeted (`--ts-max-rows`, default 120 rows, about $0.10 each) and runs only on rows phase 1 could not settle, so it does not cover every row. `--no-tinyset` gives a Fetch+Search-only pass.

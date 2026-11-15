@@ -71,7 +71,7 @@ Fetch is free up to 1,000 URLs/day; this tool uses ~6 per row, so 500 rows needs
 TinySet is billed per row (about $0.10, the rate shown in the wallet) and only runs on unresolved rows, capped by `--ts-max-rows` (default 120 = about $12 at most). Runs take 5-20 min per batch. Use `--no-tinyset` for a Fetch+Search-only pass.
 
 ## Tested vs not tested
-Tested: 66 unit tests on the deterministic core (`python3 -m unittest tests/test_core.py`), full pipeline, resume after SIGKILL, job mode, 540-row run against `tests/mock_tinyfish.py` (a local fake of the four APIs + a fake web).
+Tested: 67 unit tests on the deterministic core (`python3 -m unittest tests/test_core.py`), full pipeline, resume after SIGKILL, job mode, 540-row run against `tests/mock_tinyfish.py` (a local fake of the four APIs + a fake web).
 **Live run:** 600 rows of free-for-dev against live TinyFish (results in `full/`, write-up in `SUBMISSION.md`). TinySet followed the fixed entity list (145 matched, 5 unmatched of 150 sent);
 `--print-tinyset-spec` shows the spec. A hand spot-check of 5 verdicts found 3 wrong or doubtful (a shutdown false positive, "no dated activity" scored as zombie, undated "November 5" posts missed), so treat verdicts as leads to check via the evidence link, not as final.
 Known weak spots: social recency (X/LinkedIn are bot-walled), JS-only careers pages, `<time>`-less blogs fall back to text dates.
