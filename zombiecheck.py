@@ -692,6 +692,36 @@ Return JSON: {{"operating": true|false|null, "status_note": "active | acquired b
 "signup_available": true|false|null, "signup_url": url|null}}"""
 
 
+DEAD_GOAL = ("Open this exact URL in the browser. Do not sign in, do not submit any form, do not click anything except to dismiss a cookie banner. "
+             "Report only what you see. Return JSON: {\"page_loads\": true|false, \"title\": string|null, "
+             "\"shows_real_content\": true|false, \"error_text\": string|null}. "
+             "shows_real_content is true only if the page shows actual website content; it is false for a browser error page, a server "
+             "error (404, 5xx, DNS failure, connection refused), a blank page, or a domain-for-sale / parked page.")
+
+
+def parse_dead_check(res):
+    """Agent result -> {'loads': bool|None, 'real': bool|None, 'title', 'note'}. None = the browser check itself did not complete."""
+    if isinstance(res, str):
+        m = re.search(r"\{.*\}", res, re.S)
+        try:
+            res = json.loads(m.group(0)) if m else None
+        except Exception:
+            res = None
+    if isinstance(res, dict) and isinstance(res.get("result"), dict):
+        res = res["result"]
+    if not isinstance(res, dict) or res.get("page_loads") is None:
+        return {"loads": None, "real": None, "title": "", "note": "browser check did not return a usable answer"}
+    loads, real = bool(res.get("page_loads")), bool(res.get("shows_real_content"))
+    title = str(res.get("title") or "")[:120]
+    err = str(res.get("error_text") or "")[:160]
+    note = f"loaded, title '{title}', real content" if loads and real else (f"error page: {err or 'no content'}" if loads else f"did not load: {err or 'no content'}")
+    return {"loads": loads, "real": real, "title": title, "note": note}
+
+
+def confirm_dead(tf, name, url):
+    return parse_dead_check(tf.agent_run(url, DEAD_GOAL, secs=90))
+
+
 def agent_candidates(det, items, today):
     """Rows the cheap path could not settle: bot-blocked/JS-only sites, or live sites with no dated activity at all."""
     out = []
@@ -862,7 +892,15 @@ def decide(sig, ts, today, mode="companies"):
         if not rc.get("url"):
             return ("unclear", 15, "low", f"redirects to {dom}: acquired, renamed or merged; evidence can't tell which", overall, last_sig)
         return ("zombie", 0, "high", f"redirects to unrelated {dom}; acquired/merged wording at {rc['url']}: {rc.get('snippet', '')}", overall, last_sig)
-    if state in ("dead", "parked", "shutdown", "archived"):
+    if state == "dead":
+        dc = sig.get("dead_check")
+        fetch_codes = ",".join(f for f in sig.get("flags", []) if f.startswith("fetch_")) or "fetch failed"
+        if not dc or dc.get("loads") is None:
+            return ("unclear", 20, "low", f"Fetch API could not load the site ({fetch_codes}); browser confirmation missing, so not evidence of closure", overall, last_sig)
+        if dc.get("loads") and dc.get("real"):
+            return ("unclear", 20, "low", "Fetch API could not load the site but a browser could; not evidence of closure", overall, last_sig)
+        return ("zombie", 0, "high", f"Fetch API could not load the site ({fetch_codes}) and a browser also failed: {dc.get('note', '')}", overall, last_sig)
+    if state in ("parked", "shutdown", "archived"):
         # a TinySet note saying "rebranded to X" with a live verified update still gets a chance at not being a zombie
         return ("zombie", 0, "high" if state != "dead" else "medium", "; ".join(bits) or state, overall, last_sig if overall else "")
     if ts.get("operating") is False and ts.get("note") and re.search(r"(shut|acquired|parked|closed)", ts["note"], re.I) and not (last_iso and days_since(last_iso, today) <= 120):
@@ -1426,6 +1464,7 @@ def main(argv=None):
     ap.add_argument("--no-tinyset", action="store_true")
     ap.add_argument("--ts-max-rows", type=int, default=120, metavar="N", help="max rows sent to TinySet (only rows phase 1 could not settle; $0.10/row)")
     ap.add_argument("--ts-validate", type=int, default=30, metavar="N", help="also send a seeded random sample of N high-confidence rows to TinySet and report how often it agrees ($0.10/row)")
+    ap.add_argument("--no-dead-confirm", action="store_true", help="skip the browser (Agent) confirmation of dead-site verdicts; dead sites then stay unclear")
     ap.add_argument("--yes", action="store_true", help="do not ask before spending on TinySet")
     ap.add_argument("--ts-batch", type=int, default=30, help="rows per TinySet dataset (<=250)")
     ap.add_argument("--ts-concurrency", type=int, default=3, help="TinySet runs in flight (account limit 3)")
@@ -1520,6 +1559,40 @@ def main(argv=None):
             sg["redirect_check"] = rc
             sg.setdefault("evidence", []).append(ev("redirect_news", None, rc["url"] or "", ("news: " + rc["snippet"]) if rc["url"] else "no acquired/merged news result for this brand"))
             db.put("det", i, sg)
+        det = db.get_all("det")
+
+    # phase 1d: a dead-site verdict must be confirmed by a real browser (Agent API) before it can stay a zombie
+    if a.mode == "companies" and not a.no_dead_confirm and not ABORT.is_set():
+        todo_dead = [i for i, sg in det.items() if sg.get("site_state") == "dead" and "dead_check" not in sg
+                     and "fetch_invalid_url" not in sg.get("flags", [])]
+        if todo_dead:
+            print(f"phase 1d: browser-confirming {len(todo_dead)} dead-site rows ({len(todo_dead)} Agent runs)", file=sys.stderr)
+        agent_stop_d = threading.Event()
+
+        def dead_job(i):
+            if ABORT.is_set() or agent_stop_d.is_set():
+                return
+            sg = det[i]
+            url = norm_url(items[i][1])
+            try:
+                dc = confirm_dead(tf, items[i][0], url)
+            except Fatal as e:
+                print("Dead-site confirmation stopped:", e, file=sys.stderr)
+                if re.search(r"\b40[12]\b", str(e)):
+                    ABORT.set()
+                else:
+                    agent_stop_d.set()
+                return
+            except Exception as e:  # noqa
+                dc = {"loads": None, "real": None, "title": "", "note": f"browser check error: {type(e).__name__}"}
+            dc["url"] = url
+            sg["dead_check"] = dc
+            codes = ",".join(f for f in sg.get("flags", []) if f.startswith("fetch_")) or "fetch failed"
+            sg.setdefault("evidence", []).append(ev("dead_fetch", None, url, f"Fetch API: {codes}"))
+            sg["evidence"].append(ev("dead_browser", None, url, f"browser (Agent): {dc['note']}"))
+            db.put("det", i, sg)
+        with ThreadPoolExecutor(max_workers=a.agent_concurrency) as ex:
+            list(ex.map(dead_job, todo_dead))
         det = db.get_all("det")
 
     # phase 1b: escalate rows Fetch could not settle to a real browser (Agent API)

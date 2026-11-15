@@ -43,35 +43,37 @@ Two earlier fixes (before this rule) came from checking the last 19 zombies: onl
 
 ## Validation on ground truth (YC company status)
 
-The verdict rules were tuned on free-for-dev; this is a separate test set the rules never saw. Ground truth is YC's own status label for 500 companies from batches W12 to S19 (seeded sample, seed 42: 250 Inactive, 125 Acquired, 125 Active/Public; built by `make_yc_csv.py`, scored by `eval_yc.py`, full report and every zombie call with its evidence URL in `yc_eval.md`). Run: `python zombiecheck.py yc500.csv -o yc/o.csv --no-tinyset --agent-budget 20`. No verdict rule was changed for this test. The numbers below are copied unedited from `yc_eval.md`.
+The verdict rules were tuned on free-for-dev; this is a separate test set the rules never saw. Ground truth is YC's own status label for 500 companies from batches W12 to S19 (seeded sample, seed 42: 250 Inactive, 125 Acquired, 125 Active/Public; built by `make_yc_csv.py`, scored by `eval_yc.py`, full report and every zombie call with its evidence URL in `yc_eval.md`). Run: `python zombiecheck.py yc500.csv -o yc/o.csv --no-tinyset --agent-budget 20`. The numbers below are copied unedited from `yc_eval.md`, after the dead-site browser confirmation described next.
+
+**Dead-site confirmation (added after the first YC run).** A "dead site" zombie (Fetch 404/410/unreachable) must now be confirmed by a real browser: an Agent run opens the URL (never signs in or submits anything) and reports whether the page loads and shows real content. If the browser loads real content the row is `unclear` ("Fetch API could not load the site but a browser could; not evidence of closure"); if the browser also fails it stays zombie, with both attempts in the reason and evidence. This was applied to all 39 dead-site zombies in the YC run (39 Agent runs, no TinySet; free-for-dev had none left). Result: 37 stayed zombie and 2 became unclear (Restocks, Look After My Bills). Before it, the YC zombie calls were 51 Inactive, 22 Acquired, 4 Active/Public. About half of the confirmed failures are TLS errors (expired or invalid certificate, SSL protocol error, connection closed): the host answers but the site is broken, which fits an abandoned site but is also what a misconfigured live site looks like. The four Active/Public false zombies (Juno College of Technology, Gamebytes, Tall Poppy, Helicarrier) all failed in the browser too: a "site not found" page, an expired certificate, an SSL error and a "page not found". So they are consistent with YC's label being stale, which I cannot prove from here.
 
 ### Tool verdict by YC status (count, % of that status)
 
 | YC status (rows) | alive | slowing down | unclear | zombie |
 |---|---|---|---|---|
-| Inactive (250) | 13 (5.2%) | 67 (26.8%) | 119 (47.6%) | 51 (20.4%) |
-| Acquired (125) | 26 (20.8%) | 34 (27.2%) | 43 (34.4%) | 22 (17.6%) |
+| Inactive (250) | 13 (5.2%) | 67 (26.8%) | 120 (48.0%) | 50 (20.0%) |
+| Acquired (125) | 26 (20.8%) | 34 (27.2%) | 44 (35.2%) | 21 (16.8%) |
 | Active/Public (125) | 61 (48.8%) | 39 (31.2%) | 21 (16.8%) | 4 (3.2%) |
 
 ### Headline numbers
 
-- **(a) Recall:** 51 of 250 Inactive rows called zombie = **20.4%**.
-- **(b) Abstain:** 186 of 250 Inactive rows called unclear or slowing down = **74.4%** (unclear 119, slowing down 67). The remaining 13 (5.2%) were called alive.
+- **(a) Recall:** 50 of 250 Inactive rows called zombie = **20.0%**.
+- **(b) Abstain:** 187 of 250 Inactive rows called unclear or slowing down = **74.8%** (unclear 120, slowing down 67). The remaining 13 (5.2%) were called alive.
 - **(c) False-zombie rate:** 4 of 125 Active/Public rows called zombie = **3.2%**.
-- **(d) Acquired rows:** 65 of 125 were zombie or unclear (22 zombie, 43 unclear); 18 of those were via a redirect to another domain (3 zombie, 15 unclear).
+- **(d) Acquired rows:** 65 of 125 were zombie or unclear (21 zombie, 44 unclear); 18 of those were via a redirect to another domain (3 zombie, 15 unclear).
 
 ### (c) Every Active/Public row the tool called zombie
 
 | name | URL | YC status | what fired | evidence URL |
 |---|---|---|---|---|
-| Juno College of Technology | http://junocollege.com | Active | site unreachable (page_not_found 404) | http://junocollege.com |
-| Gamebytes | http://www.gamebytes.io | Active | site unreachable (page_not_found 404) | http://www.gamebytes.io |
-| Tall Poppy | https://tallpoppy.com | Active | site unreachable (target_unreachable) | https://tallpoppy.com |
-| Helicarrier (prev Buycoins) | https://helicarrier.studio | Active | site unreachable (page_not_found 404) | https://helicarrier.studio |
+| Juno College of Technology | http://junocollege.com | Active | Fetch API could not load the site (fetch_page_not_found) and a browser also failed: error page: Site not found. Well, this is awkward. The site you are looking for is not here. 404 Error. | http://junocollege.com |
+| Gamebytes | http://www.gamebytes.io | Active | Fetch API could not load the site (fetch_page_not_found) and a browser also failed: error page: Your connection is not private; net::ERR_CERT_DATE_INVALID | http://www.gamebytes.io |
+| Tall Poppy | https://tallpoppy.com | Active | Fetch API could not load the site (fetch_target_unreachable) and a browser also failed: error page: tallpoppy.com sent an invalid response. ERR_SSL_PROTOCOL_ERROR | https://tallpoppy.com |
+| Helicarrier (prev Buycoins) | https://helicarrier.studio | Active | Fetch API could not load the site (fetch_page_not_found) and a browser also failed: error page: Page not found. Looks like you’ve followed a broken link or entered a URL that doesn’t exist on this sit | https://helicarrier.studio |
 
-Reading it: the tool is precise but conservative. When it says zombie it is almost always a dead or parked site (the 77 zombie calls are dead 404/unreachable sites, parked domains, shutdown notices, or acquired-by redirects), but it calls only about one in five Inactive companies a zombie, and abstains (unclear or slowing down) on three in four, because a company can stop operating while its website stays up and nothing on the site is dated. The four false zombies are sites that are down right now: I re-fetched them (http, https and www) and each returns a 404 or is unreachable, so YC's "Active" label looks stale, but I cannot prove that from here. YC's status is a label, not a live check.
+Reading it: the tool is precise but conservative. Its zombie calls are dead or parked sites, shutdown notices, or acquired-by redirects, but it calls only one in five Inactive companies a zombie, and abstains (unclear or slowing down) on three in four, because a company can stop operating while its website stays up and nothing on the site is dated. YC's status is a label, not a live check.
 
-Bug found and fixed during this test: for hard-gate zombies (parked, dead, shutdown, redirect), the `zc_evidence_url` column sometimes held a social post (a YouTube, LinkedIn or Instagram link) instead of the site page, because `build_row` first picked whichever evidence matched the "last activity" date. It now uses the site page (or the corroborating news / landing page for a redirect) for any hard-gate zombie. Verdicts and counts did not change; only the evidence link did. Regenerated from saved state with no network (`recompute_state.py`), and covered by a test. (`decide()` was not touched.)
+Bug found and fixed during this test: for hard-gate zombies the `zc_evidence_url` column sometimes held a social post (YouTube, LinkedIn or Instagram) instead of the site page, because `build_row` first picked whichever evidence matched the "last activity" date. It now uses the site page (or the corroborating news / landing page for a redirect). Verdicts and counts did not change. `decide()` was not otherwise touched in the first YC run.
 
 ## How TinySet is used (and the other three endpoints)
 | endpoint | role | why it is not padding |
@@ -102,7 +104,7 @@ The verdict comes from a pure function (`decide()`), not an LLM, so judges can r
 | ghost jobs (`--mode jobs`) | 404/410, "no longer accepting", expired `validThrough`, redirect to the careers index, posting age |
 
 ## Scale and resume
-State lives in SQLite (`<out>.zc/state.db`): per-row results, TinySet dataset ids and verification results. SIGKILL mid-run, then re-run the same command, and it continues. TinySet runs are re-attached, not re-bought. A failing row never stops the run. 401/402/403 stop cleanly. 429/5xx retry with `Retry-After`. Client-side limits match the documented quotas. The same URL is fetched once per run. Tested: 67 unit tests, a 540-row end-to-end run with SIGKILL and resume against a local fake of all four APIs, and the live 600-row run above (resumed once after a bug fix).
+State lives in SQLite (`<out>.zc/state.db`): per-row results, TinySet dataset ids and verification results. SIGKILL mid-run, then re-run the same command, and it continues. TinySet runs are re-attached, not re-bought. A failing row never stops the run. 401/402/403 stop cleanly. 429/5xx retry with `Retry-After`. Client-side limits match the documented quotas. The same URL is fetched once per run. Tested: 72 unit tests, a 540-row end-to-end run with SIGKILL and resume against a local fake of all four APIs, and the live 600-row run above (resumed once after a bug fix).
 
 ## Known limits (honest)
 Social recency is the weakest signal: X and LinkedIn are walled, so it is weighted 15 and marked unverified when only TinySet saw it. JS-only careers pages are escalated to Agent within the budget. TinySet is budgeted (`--ts-max-rows`, default 120 rows, about $0.10 each) and runs only on rows phase 1 could not settle, so it does not cover every row. `--no-tinyset` gives a Fetch+Search-only pass.

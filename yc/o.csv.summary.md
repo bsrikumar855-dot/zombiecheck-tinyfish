@@ -2,7 +2,7 @@
 
 rows: 500  checked: 500
 
-- unclear: 183
+- unclear: 185
 - slowing down: 140
 - alive: 100
-- zombie: 77
+- zombie: 75

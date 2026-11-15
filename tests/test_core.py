@@ -350,7 +350,7 @@ class FalseZombieFixes(unittest.TestCase):
         self.assertNotEqual(z.decide(self.sig(social=D(800), signup="broken"), None, T)[0], "zombie")
 
     def test_each_hard_gate_is_zombie_without_any_dates(self):
-        for st in ("dead", "parked", "archived"):
+        for st in ("parked", "archived"):
             self.assertEqual(z.decide(self.sig(site_state=st), None, T)[0], "zombie", st)
         self.assertEqual(z.decide(self.sig(site_state="shutdown", flags=["shutdown_notice"]), None, T)[0], "zombie")
         ts = {"operating": False, "note": "shut down"}
@@ -433,7 +433,8 @@ class FalseZombieFixes(unittest.TestCase):
         v, _, _, reason, *_ = z.decide(self.sig(site_state="dead", flags=["fetch_invalid_url"]), None, T)
         self.assertEqual(v, "unclear")
         self.assertIn("invalid_url", reason)
-        self.assertEqual(z.decide(self.sig(site_state="dead", flags=["fetch_target_unreachable"]), None, T)[0], "zombie")
+        dead = self.sig(site_state="dead", flags=["fetch_target_unreachable"])
+        self.assertEqual(z.decide(dead, None, T)[0], "unclear")  # no browser confirmation yet
 
     def test_hard_gate_evidence_url_is_the_site_not_a_social_post(self):
         sig = {**self.sig(site_state="parked", final_url="https://oldco.com/", social=D(300)),
@@ -494,6 +495,44 @@ class RedirectCorroboration(unittest.TestCase):
         tf = FakeTF({"https://oldco.com": page("https://oldco.com", body, final="https://bigcorp.com/")})
         s = z.analyze_site(tf, "oldco", "oldco.com", T, do_search=False)
         self.assertEqual(s["site_state"], "live")  # brand on the landing page -> treated as a move/rebrand first
+
+
+class DeadSiteConfirmation(unittest.TestCase):
+    dead = {"site_state": "dead", "flags": ["fetch_page_not_found"], "evidence": [], "reason_bits": [], "jobs": None, "signup": None,
+            "update": None, "release": None, "news": None, "social": None, "final_url": ""}
+
+    def test_browser_loads_real_content_means_unclear(self):
+        sig = {**self.dead, "dead_check": {"loads": True, "real": True, "title": "Acme", "note": "loaded"}}
+        v, _, conf, reason, *_ = z.decide(sig, None, T)
+        self.assertEqual((v, conf), ("unclear", "low"))
+        self.assertEqual(reason, "Fetch API could not load the site but a browser could; not evidence of closure")
+
+    def test_browser_also_fails_stays_zombie_with_both_attempts_in_reason(self):
+        for dc in ({"loads": False, "real": False, "note": "did not load: DNS failure"}, {"loads": True, "real": False, "note": "error page: 404"}):
+            v, _, _, reason, *_ = z.decide({**self.dead, "dead_check": dc}, None, T)
+            self.assertEqual(v, "zombie")
+            self.assertIn("fetch_page_not_found", reason)
+            self.assertIn("browser also failed", reason)
+
+    def test_browser_check_that_did_not_complete_is_not_proof(self):
+        v, _, _, reason, *_ = z.decide({**self.dead, "dead_check": {"loads": None, "real": None, "note": "browser check did not return a usable answer"}}, None, T)
+        self.assertEqual(v, "unclear")
+        self.assertIn("browser confirmation missing", reason)
+
+    def test_parse_dead_check(self):
+        self.assertEqual(z.parse_dead_check({"page_loads": True, "title": "Hi", "shows_real_content": True})["real"], True)
+        self.assertEqual(z.parse_dead_check('{"page_loads": false, "shows_real_content": false, "error_text": "DNS"}')["loads"], False)
+        self.assertIsNone(z.parse_dead_check(None)["loads"])
+        self.assertIsNone(z.parse_dead_check({"title": "x"})["loads"])
+
+    def test_confirm_dead_uses_async_agent_with_no_signin_goal(self):
+        calls = []
+        class TFA:
+            def agent_run(self, url, goal, steps=20, secs=120, poll=3.0):
+                calls.append((url, goal, secs)); return {"page_loads": True, "title": "T", "shows_real_content": True}
+        r = z.confirm_dead(TFA(), "Acme", "https://acme.io")
+        self.assertTrue(r["loads"] and r["real"])
+        self.assertIn("Do not sign in", calls[0][1])
 
 
 if __name__ == "__main__":
