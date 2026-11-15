@@ -261,5 +261,44 @@ class TinySetValidate(unittest.TestCase):
         self.assertEqual((d["jobs"], d["signup"], d["note"]), (2, True, "shut down"))
 
 
+class FalseZombieFixes(unittest.TestCase):
+    base = Verdict.base
+
+    def sig(self, **kw): return {**self.base, **kw}
+
+    def test_shutdown_phrase_about_another_service_is_ignored(self):
+        self.assertFalse(z.own_shutdown("# WorldTimeAPI has shut down. Change one hostname.", {"timezone"}))
+        self.assertTrue(z.own_shutdown("Timezone has shut down. Thanks for the ride.", {"timezone"}))
+        self.assertTrue(z.own_shutdown("We have shut down and no longer accept users.", {"acme"}))
+
+    def test_brand_in_preceding_sentence_does_not_count(self):
+        head = "Timezone.io: same endpoints, no API key. WorldTimeAPI has shut down. Change one hostname."
+        self.assertFalse(z.own_shutdown(head, {"timezone"}))
+
+    def test_tls_end_of_life_is_not_a_shutdown(self):
+        tf = FakeTF({"https://codeac.io": page("https://codeac.io", "TLS 1.0 and 1.1 reached End of Life and were deprecated by several browsers.")})
+        s = z.analyze_site(tf, "Codeac", "codeac.io", T, do_search=False)
+        self.assertNotEqual(s["site_state"], "shutdown")
+
+    def test_live_site_with_no_dates_is_unclear_not_zombie(self):
+        self.assertEqual(z.decide(self.sig(signup="works"), None, T)[0], "unclear")
+
+    def test_social_only_recent_is_not_zombie(self):
+        self.assertNotEqual(z.decide(self.sig(social=D(111), signup="works"), None, T)[0], "zombie")
+
+    def test_year_old_newest_post_on_live_site_is_not_zombie(self):
+        self.assertEqual(z.decide(self.sig(update=D(432)), None, T)[0], "slowing down")
+
+    def test_old_social_only_on_live_site_is_unclear(self):
+        self.assertEqual(z.decide(self.sig(social=D(1300), signup="works"), None, T)[0], "unclear")
+
+    def test_blocked_site_is_never_zombie_without_proof(self):
+        self.assertEqual(z.decide(self.sig(site_state="blocked", social=D(250)), None, T)[0], "unclear")
+
+    def test_real_zombies_still_zombies(self):
+        self.assertEqual(z.decide(self.sig(update=D(1100), signup="broken"), None, T)[0], "zombie")
+        self.assertEqual(z.decide(self.sig(site_state="parked"), None, T)[0], "zombie")
+
+
 if __name__ == "__main__":
     unittest.main()

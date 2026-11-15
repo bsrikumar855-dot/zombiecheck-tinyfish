@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 zombiecheck - give it a spreadsheet of 500+ rows, get it back with a verdict on every row
-(alive / slowing down / zombie), checked against LIVE pages via the TinyFish APIs.
+(alive / slowing down / zombie / unclear), checked against LIVE pages via the TinyFish APIs.
 
   TinySet  (POST /v1/datasets)   web-wide gap filling in batches: social, updates, jobs, sign-up, status, with sources
   Fetch    (POST api.fetch)      live (ttl=0) homepage + blog/changelog/careers/sign-up/GitHub feeds; redirects, parked domains
@@ -281,7 +281,18 @@ PARK_HOSTS = ("sedo.com", "dan.com", "hugedomains.com", "afternic.com", "godaddy
 ARCHIVED = re.compile(r"(this repository (has been|was) archived|archived by the owner|is now read-only|this project is no longer maintained|deprecated[:.] (use|see|moved))", re.I)
 SHUT = re.compile(r"(has (shut|closed|wound) down|have (shut|closed) down|no longer (available|operating|in business|supported|maintained|accepting)|"
                   r"(has been|was|is) (discontinued|sunset|decommissioned|archived)|we('| a)re (shutting down|sunsetting|closing)|"
-                  r"end of life|service (has )?ended|ceased operations|this (project|product|service|repository) is (archived|deprecated|discontinued|no longer))", re.I)
+                  r"service (has )?ended|ceased operations|this (project|product|service|repository) is (archived|deprecated|discontinued|no longer))", re.I)
+def own_shutdown(head, toks):
+    """True only if a shutdown phrase is about this site: first person / 'this product', or one of the row's own brand tokens just before it.
+    'WorldTimeAPI has shut down' on timezone.io's page (a replacement service) is not a shutdown of timezone.io."""
+    for m in SHUT.finditer(head):
+        phrase = m.group(0).lower()
+        before = re.split(r"(?<=[.!?])" + chr(92) + "s+|[<>" + chr(92) + "n]", head[max(0, m.start() - 120):m.start()].lower())[-1]  # same sentence only
+        if re.match(r"we|this ", phrase) or re.search(r"\b(we|our)\s*$", before) or any(t in before for t in toks):
+            return True
+    return False
+
+
 ACQ = re.compile(r"(has been acquired by|was acquired by|is now part of|acquired by [A-Z]|joined (forces )?with [A-Z]|now (part of|owned by))", re.I)
 REBRAND = re.compile(r"(formerly( known as)?|previously known as|we('| ha)ve rebranded|rebranded (as|to)|now (called|known as))", re.I)
 CLOSED_SIGNUP = re.compile(r"(wait ?list|invite[- ]only|sign-?ups? (are )?(currently )?(closed|paused|disabled)|registration (is )?(closed|disabled)|"
@@ -369,8 +380,9 @@ def ev(signal, d, url, basis):
 
 def brand_tokens(name, url):
     t = {w for w in re.split(r"[^a-z0-9]+", (name or "").lower()) if len(w) >= 4}
-    t.add(reg_domain(urllib.parse.urlparse(url).netloc).split(".")[0])
-    return {x for x in t if len(x) >= 3}
+    dom = reg_domain(urllib.parse.urlparse(url).netloc).split(".")[0]
+    t.add(dom)
+    return {x for x in t if len(x) >= 3 or x == dom}
 
 
 def resolve_url(tf, name):
@@ -440,7 +452,9 @@ def analyze_site(tf, name, url, today, do_search=True):
             flags.append("parked_domain")
         elif reg_domain(fh) != reg_domain(p0.netloc):
             toks = brand_tokens(name, base)
-            if any(t in head.lower() for t in toks):
+            tgt = reg_domain(fh).split(".")[0]
+            sib = any(len(t) >= 4 and len(os.path.commonprefix([t, tgt])) >= 4 for t in toks)  # sonarcloud.io -> sonarsource.com
+            if sib or any(t in head.lower() for t in toks):
                 flags.append(f"moved_to:{reg_domain(fh)}")
                 out["reason_bits"].append(f"moved to {reg_domain(fh)} (brand still present: rebrand/migration)")
             else:
@@ -455,7 +469,7 @@ def analyze_site(tf, name, url, today, do_search=True):
             if ad:
                 E.append(ev("archived", max(ad), final, "archive notice on repository page"))
         if out["site_state"] == "live":
-            if SHUT.search(head):
+            if own_shutdown(head, brand_tokens(name, base)):
                 out["site_state"] = "shutdown"
                 out["reason_bits"].append("site says it has shut down / been discontinued")
                 flags.append("shutdown_notice")
@@ -777,7 +791,7 @@ def decide(sig, ts, today, mode="companies"):
         bits.append(f"latest update {last_iso} via {last_sig} ({a}d ago)")
     elif state == "live":
         bits.append("no dated update found on checked pages")
-        known += 1  # absence on live fetched pages is itself evidence
+        den -= 45  # unknown, not zero: a live site with undated pages is not evidence of death
     # social (15)
     s = days_since(soc_iso, today)
     if s is not None:
@@ -806,19 +820,36 @@ def decide(sig, ts, today, mode="companies"):
     elif state == "blocked":
         bits.append("site blocked automated fetch (unverified)")
     score = round(100 * pts / den) if den else 0
-    if a is not None and a > 730 and not (n and n > 0):
-        score = min(score, 25)
-        bits.append("nothing newer than 2 years")
-    if a is None and soc_iso is None and not n:
-        score = min(score, 29)
+    if a is None and soc_iso is None and not n and state == "live":
+        # nothing dated anywhere: we cannot tell. Say so instead of guessing "zombie".
+        return ("unclear", min(score, 45), "low", "; ".join(bits + ["live site but no dated activity found: cannot tell"]), overall, last_sig)
+    ages = [x for x in (a, s if soc_w == 1.0 else None) if x is not None]  # newest dated thing we verified ourselves
+    newest = min(ages) if ages else None
+    if newest is not None and newest > 730 and not (n and n > 0):
+        if state == "live" and su in ("works", "unclear") and newest <= 1095:
+            score = min(score, 45)  # old newest date, but the site loads and takes sign-ups: weaker than a zombie
+            bits.append("newest dated item is over 2 years old (site still live)")
+        else:
+            score = min(score, 25)
+            bits.append("nothing newer than 2 years")
     v = "alive" if score >= 60 else "slowing down" if score >= 30 else "zombie"
+    if v == "zombie" and state == "live" and newest is not None and newest <= 730 and not any(
+            f in sig.get("flags", []) for f in ("shutdown_notice", "acquisition_notice")):
+        v = "slowing down"  # a newest dated item under 2 years old is not enough evidence to call a live site a zombie
+        bits.append("newest dated item under 2 years old")
     recent = (a is not None and a <= 120) or (s is not None and s <= 120)
     if v == "alive" and not recent and not (n and n > 0):
         v = "slowing down"  # a site that loads and takes sign-ups but has published nothing in 4 months is not "alive"
         bits.append("no dated activity in 120 days")
+    if v == "zombie" and ((a is None and state == "live") or state == "blocked"):
+        # an old social post alone, or a site that blocked us, is not enough to call anything dead
+        v = "unclear"
+        bits.append("no dated page activity to judge by" if state == "live" else "site blocked automated fetch; no proof either way")
     if "acquisition_notice" in sig.get("flags", []) and v == "alive" and (a is None or a > 120):
         v = "slowing down"
     conf = "high" if known >= 4 else "medium" if known == 3 else "low"
+    if v in ("slowing down", "unclear") and a is None:
+        conf = "low"
     if state == "blocked":
         conf = "low"
     return (v, score, conf, "; ".join(bits), overall, last_sig)
@@ -1206,7 +1237,7 @@ details summary{cursor:pointer;color:#0b57d0}.ev{font-size:12px;color:#444}.ev a
 <th data-k="s">Score</th><th data-k="d">Last activity</th><th>Why</th><th>Evidence</th></tr></thead><tbody id="b"></tbody></table>
 <script>const D=__DATA__;let F="all",S="s",dir=-1;const C={};D.forEach(r=>C[r.v]=(C[r.v]||0)+1);
 document.getElementById("sum").textContent=D.length+" rows · "+Object.entries(C).map(([k,v])=>v+" "+k).join(" · ")+" · generated __WHEN__";
-["all","alive","slowing down","zombie"].forEach(k=>{const b=document.createElement("button");b.textContent=k+(k=="all"?"":" ("+(C[k]||0)+")");
+["all","alive","slowing down","zombie","unclear"].forEach(k=>{const b=document.createElement("button");b.textContent=k+(k=="all"?"":" ("+(C[k]||0)+")");
 b.onclick=()=>{F=k;draw()};b.dataset.k=k;document.getElementById("f").appendChild(b)});
 document.querySelectorAll("th[data-k]").forEach(t=>t.onclick=()=>{dir=S==t.dataset.k?-dir:-1;S=t.dataset.k;draw()});
 document.getElementById("q").oninput=draw;const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -1243,7 +1274,7 @@ def write_xlsx(path, header, rows, results):
     ws = wb.active
     ws.title = "zombie check"
     ws.append(header + ZC)
-    fills = {"alive": "DFF3E4", "slowing down": "FDF0D5", "zombie": "FBE1E1"}
+    fills = {"alive": "DFF3E4", "slowing down": "FDF0D5", "zombie": "FBE1E1", "unclear": "E6E6E6"}
     vcol, ucol, ecol = len(header) + ZC.index("zc_verdict") + 1, len(header) + ZC.index("zc_evidence_url") + 1, len(header) + ZC.index("zc_evidence") + 1
     for i, r in enumerate(rows):
         res = results.get(i) or {}
@@ -1375,7 +1406,7 @@ def main(argv=None):
                 apply_agent(s, agent_probe(tf, items[i][0], s.get("final_url") or norm_url(items[i][1])), today)
             except Fatal as e:
                 print("Agent stage stopped:", e, file=sys.stderr)
-                if re.search(r"40[12]", str(e)):
+                if re.search(r"\b40[12]\b", str(e)):
                     ABORT.set()      # bad key / empty wallet: nothing else can run either
                 else:
                     agent_stop.set()  # e.g. 403: skip the Agent step, keep going with TinySet
@@ -1390,9 +1421,10 @@ def main(argv=None):
 
     if use_ts and not ABORT.is_set():
         chosen, skip = ts_select(det, items, today, a.ts_max_rows)
-        sample = ts_validate_sample(skip, a.ts_validate)
+        saved = db.meta("ts_validate")  # keep the first sample on re-runs: those are the rows TinySet was actually sent
+        sample = json.loads(saved) if saved else ts_validate_sample(skip, a.ts_validate)
         for i in sample:
-            skip.pop(i)
+            skip.pop(i, None)
         db.meta("ts_skip", json.dumps(skip))
         db.meta("ts_validate", json.dumps(sample))
         chosen = chosen + sample

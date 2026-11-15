@@ -6,3 +6,4 @@ live30*/
 list.csv
 full/*.zc/
 full/*.log
+full/_*.txt
