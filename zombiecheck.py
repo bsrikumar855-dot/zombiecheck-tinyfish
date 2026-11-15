@@ -820,23 +820,27 @@ def decide(sig, ts, today, mode="companies"):
     elif state == "blocked":
         bits.append("site blocked automated fetch (unverified)")
     score = round(100 * pts / den) if den else 0
-    ages = [x for x in (a, s if soc_w == 1.0 else None) if x is not None]  # newest dated thing we verified ourselves
-    newest = min(ages) if ages else None
+    # "positive evidence of staleness" = a dated signal from the organisation's OWN pages (blog, changelog, release/commit feed,
+    # sitemap/feed lastmod, Agent-read page). Social and third-party news dates may move the score but never make a zombie.
+    own = [days_since(sig[k], today) for k in ("update", "release", "agent_update") if sig.get(k)]
+    own_newest = min(own) if own else None
+    any_dated = a is not None or s is not None  # own pages, news, TinySet dates or social: any dated signal at all
+    newest_all = min(x for x in (a, s) if x is not None) if any_dated else None
     NO_DATES = "no dated activity found; not evidence of closure"
     rest = [b_ for b_ in bits if b_ != "no dated update found on checked pages"]
-    if newest is None and not (n and n > 0) and state in ("live", "blocked"):
+    if not any_dated and not (n and n > 0) and state in ("live", "blocked"):
         # nothing dated anywhere: absence of dates is not evidence of closure
         return ("unclear", min(score, 45), "low", "; ".join([NO_DATES] + rest), overall, last_sig)
-    if newest is not None and newest > 730 and not (n and n > 0):
+    if own_newest is not None and own_newest > 730 and newest_all > 730 and not (n and n > 0):
         score = min(score, 25)
-        bits.append(f"newest dated activity is {newest} days old (over 730)")
+        bits.append(f"newest dated signal on its own pages is {own_newest} days old (over 730)")
     v = "alive" if score >= 60 else "slowing down" if score >= 30 else "zombie"
-    if v == "zombie" and not (newest is not None and newest > 730):
-        # not a hard gate (those returned above) and no dated signal older than 730 days: cannot call it a zombie
-        if newest is None:
+    if v == "zombie" and not (own_newest is not None and own_newest > 730):
+        # not a hard gate (those returned above) and no own-page dated signal older than 730 days: cannot call it a zombie
+        if not any_dated:
             return ("unclear", min(score, 45), "low", "; ".join([NO_DATES] + rest), overall, last_sig)
         v = "slowing down"
-        bits.append("newest dated activity is under 730 days old")
+        bits.append("no own-page dated signal over 730 days old (social/news dates alone never make a zombie)")
     if v == "zombie" and any(f.startswith("moved_to:") for f in sig.get("flags", [])):
         v = "unclear"  # same brand lives on at a new domain; the old domain's stale dates prove nothing
         bits.append("brand continues at its new domain")

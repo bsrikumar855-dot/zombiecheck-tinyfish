@@ -289,8 +289,8 @@ class FalseZombieFixes(unittest.TestCase):
     def test_year_old_newest_post_on_live_site_is_not_zombie(self):
         self.assertEqual(z.decide(self.sig(update=D(432)), None, T)[0], "slowing down")
 
-    def test_old_social_only_on_live_site_is_stale_evidence(self):
-        self.assertEqual(z.decide(self.sig(social=D(1300), signup="works"), None, T)[0], "zombie")
+    def test_old_social_only_on_live_site_is_not_zombie(self):
+        self.assertEqual(z.decide(self.sig(social=D(1300), signup="works"), None, T)[0], "slowing down")
 
     def test_blocked_site_with_recent_social_is_not_zombie(self):
         self.assertNotEqual(z.decide(self.sig(site_state="blocked", social=D(250)), None, T)[0], "zombie")
@@ -312,8 +312,8 @@ class FalseZombieFixes(unittest.TestCase):
         # newest dated item 729 days old: never zombie; 731 days old: zombie
         self.assertNotEqual(z.decide(self.sig(update=D(729), signup="broken"), None, T)[0], "zombie")
         self.assertEqual(z.decide(self.sig(update=D(731), signup="broken"), None, T)[0], "zombie")
-        # a stale verified social post is a dated signal too
-        self.assertEqual(z.decide(self.sig(social=D(800), signup="broken"), None, T)[0], "zombie")
+        # social is not evidence from the organisation's own pages
+        self.assertNotEqual(z.decide(self.sig(social=D(800), signup="broken"), None, T)[0], "zombie")
 
     def test_each_hard_gate_is_zombie_without_any_dates(self):
         for st in ("dead", "parked", "absorbed", "shutdown", "archived"):
@@ -324,6 +324,25 @@ class FalseZombieFixes(unittest.TestCase):
     def test_never_zombie_from_a_low_score_alone(self):
         for upd in (1, 100, 300, 600, 729):
             self.assertNotEqual(z.decide(self.sig(update=D(upd), signup="broken"), None, T)[0], "zombie", upd)
+
+    def test_social_only_800d_is_not_zombie(self):
+        v, _, _, reason, *_ = z.decide(self.sig(social=D(800), signup="broken"), None, T)
+        self.assertEqual(v, "slowing down")
+        self.assertIn("social/news dates alone never make a zombie", reason)
+
+    def test_blog_800d_with_no_other_activity_is_zombie(self):
+        v, _, _, reason, *_ = z.decide(self.sig(update=D(800)), None, T)
+        self.assertEqual(v, "zombie")
+        self.assertIn("own pages is 800 days old", reason)
+
+    def test_news_only_800d_is_not_zombie(self):
+        self.assertEqual(z.decide(self.sig(news=D(800)), None, T)[0], "slowing down")
+
+    def test_social_and_news_only_old_with_nothing_else_dated_is_unclear_when_no_dates(self):
+        self.assertEqual(z.decide(self.sig(), None, T)[0], "unclear")
+
+    def test_old_own_page_date_with_fresh_social_is_not_pushed_to_zombie(self):
+        self.assertNotEqual(z.decide(self.sig(update=D(900), social=D(20), signup="works"), None, T)[0], "zombie")
 
     def test_real_zombies_still_zombies(self):
         self.assertEqual(z.decide(self.sig(update=D(1100), signup="broken"), None, T)[0], "zombie")
