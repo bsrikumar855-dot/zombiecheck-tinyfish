@@ -121,5 +121,135 @@ class TinySetMatching(unittest.TestCase):
         self.assertEqual(sorted(z.ts_collect(db, items)), [0, 1])
 
 
+class BatchResume(unittest.TestCase):
+    def test_new_rows_get_batched_after_partial_run(self):
+        import tempfile, json
+        db = z.DB(os.path.join(tempfile.mkdtemp(), "b.db"))
+        z.new_batches(db, list(range(30)), 30)
+        z.new_batches(db, list(range(600)), 30)
+        z.new_batches(db, list(range(600)), 30)  # idempotent
+        batched = sorted(i for (j,) in db.q("SELECT idxs FROM batches") for i in json.loads(j))
+        self.assertEqual(batched, list(range(600)))
+        self.assertEqual(db.q("SELECT COUNT(*) FROM batches")[0][0], 20)
+
+
+class AgentRun(unittest.TestCase):
+    def _tf(self, replies):
+        calls = []
+        def fake_http(method, url, key, body=None, params=None, timeout=150, retries=5):
+            calls.append((method, url)); return replies.pop(0)
+        z.http, old = fake_http, z.http
+        self.addCleanup(setattr, z, "http", old)
+        return z.TF("k"), calls
+
+    def test_async_completed_returns_result(self):
+        tf, calls = self._tf([(200, {"run_id": "r1"}), (200, {"status": "RUNNING"}), (200, {"status": "COMPLETED", "result": {"ok": 1}})])
+        self.assertEqual(tf.agent_run("https://a.io", "g", poll=0), {"ok": 1})
+        self.assertTrue(calls[0][1].endswith("/v1/automation/run-async"))
+        self.assertTrue(calls[1][1].endswith("/v1/runs/r1"))
+
+    def test_failed_run_is_not_success(self):
+        tf, _ = self._tf([(200, {"run_id": "r1"}), (200, {"status": "FAILED", "result": {"ok": 1}})])
+        self.assertIsNone(tf.agent_run("https://a.io", "g", poll=0))
+
+    def test_default_agent_concurrency_is_two(self):
+        import inspect
+        self.assertIn('"--agent-concurrency", type=int, default=2', inspect.getsource(z))
+
+
+class TinySet403(unittest.TestCase):
+    def test_403_stops_stage_with_message(self):
+        import tempfile, io, contextlib, types
+        db = z.DB(os.path.join(tempfile.mkdtemp(), "t.db"))
+        class TF403:
+            stats = {"tinyset_rows": 0}
+            def ds(self, *a, **k): return 403, {}
+        items = {i: (f"N{i}", f"n{i}.io") for i in range(4)}
+        args = types.SimpleNamespace(ts_batch=2, ts_concurrency=1, ts_timeout=1, ts_poll=0)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            z.run_tinyset(TF403(), db, items, args)
+        self.assertIn("TinySet needs a personal API key, not an org key", err.getvalue())
+        self.assertEqual(db.q("SELECT COUNT(*) FROM batches WHERE status='failed'")[0][0], 1)
+        self.assertEqual(db.q("SELECT COUNT(*) FROM batches WHERE status='new'")[0][0], 1)
+
+
+class TinySetBudget(unittest.TestCase):
+    live = {"site_state": "live", "flags": [], "evidence": [], "reason_bits": [], "jobs": None, "signup": None,
+            "update": None, "release": None, "news": None, "social": None}
+
+    def det(self):
+        fresh = {**self.live, "update": D(5), "signup": "works", "jobs": 3}
+        return {0: fresh,                                   # resolved
+                1: {**self.live, "update": D(100)},         # dated, lower confidence
+                2: {**self.live},                           # live, no dated activity
+                3: {**self.live, "site_state": "blocked"},  # blocked
+                4: {**fresh}}                               # resolved
+
+    def test_priority_order_and_budget(self):
+        det = self.det()
+        order, _ = z.ts_select(det, {i: ("n", "u") for i in det}, T, 99)
+        self.assertEqual(order[:2], [3, 2])                 # blocked, then undated live
+        chosen, skip = z.ts_select(det, {i: ("n", "u") for i in det}, T, 2)
+        self.assertEqual(chosen, [3, 2])
+        self.assertEqual(skip[0], "skipped_resolved")
+        self.assertEqual(skip[4], "skipped_resolved")
+        self.assertEqual(skip.get(1), "skipped_budget")
+
+    def test_zero_budget_sends_nothing(self):
+        det = self.det()
+        chosen, skip = z.ts_select(det, {i: ("n", "u") for i in det}, T, 0)
+        self.assertEqual(chosen, [])
+        self.assertEqual(set(skip.values()), {"skipped_resolved", "skipped_budget"})
+
+    def test_build_row_flags(self):
+        self.assertEqual(z.build_row(0, self.live, None, None, T, "companies", "skipped_budget")["zc_tinyset"], "skipped_budget")
+        self.assertEqual(z.build_row(0, self.live, None, None, T, "companies")["zc_tinyset"], "not_run")
+
+    def test_confirmation(self):
+        import io, contextlib
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertTrue(z.ts_confirm(120, True))
+            self.assertFalse(z.ts_confirm(120, False, io.StringIO("y\n")))  # not a tty -> refuses
+        self.assertIn("estimated $12.00", err.getvalue())
+        self.assertIn("--yes", err.getvalue())
+
+        class TTY(io.StringIO):
+            def isatty(self): return True
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertTrue(z.ts_confirm(5, False, TTY("y\n")))
+            self.assertFalse(z.ts_confirm(5, False, TTY("\n")))
+
+
+class TinySetValidate(unittest.TestCase):
+    def test_sample_is_seeded_and_only_resolved(self):
+        skip = {i: ("skipped_resolved" if i % 2 else "skipped_budget") for i in range(100)}
+        a, b = z.ts_validate_sample(skip, 10), z.ts_validate_sample(dict(skip), 10)
+        self.assertEqual(a, b)
+        self.assertEqual(len(a), 10)
+        self.assertTrue(all(i % 2 for i in a))
+        self.assertEqual(len(z.ts_validate_sample(skip, 999)), 50)  # capped at the pool
+        self.assertEqual(z.ts_validate_sample(skip, 0), [])
+
+    def test_crosscheck_counts(self):
+        pairs = [("alive", "alive"), ("alive", "zombie"), ("zombie", "zombie"), ("slowing down", "zombie"),
+                 ("alive", "slowing down"), ("alive", None)]
+        self.assertEqual(z.ts_crosscheck(pairs), (4, 5, 6))  # the unanswered row never agrees
+
+    def test_confirm_mentions_sample_cost(self):
+        import io, contextlib
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            z.ts_confirm(150, True, n_validate=30)
+        self.assertIn("including 30 cross-check sample rows", err.getvalue())
+        self.assertIn("estimated $15.00", err.getvalue())
+
+    def test_ts_dict_matches_build_row_inputs(self):
+        d = z.ts_dict({"still_operating": False, "status_note": "shut down", "open_jobs": 2, "signup_open": True}, {})
+        self.assertIs(d["operating"], False)
+        self.assertEqual((d["jobs"], d["signup"], d["note"]), (2, True, "shut down"))
+
+
 if __name__ == "__main__":
     unittest.main()

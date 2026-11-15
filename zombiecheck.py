@@ -12,7 +12,7 @@ Deterministic core, LLM/agent layer on the edge: the verdict is computed by plai
 dated, linkable evidence. TinySet claims are re-fetched live and only count in full if the page confirms them.
 Stdlib only. Resumable: all state lives in <output>.zc/state.db.
 """
-import argparse, csv, difflib, email.utils, hashlib, io, json, os, re, signal, sqlite3, sys, threading, time
+import argparse, csv, difflib, email.utils, hashlib, io, json, os, random, re, signal, sqlite3, sys, threading, time
 import urllib.error, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
@@ -149,14 +149,29 @@ class TF:
             self.stats["search"] += 1
         return js.get("results", []) if st == 200 else []
 
-    def agent_run(self, url, goal, steps=20, secs=120):
-        st, js = http("POST", AGENT_URL + "/v1/automation/run", self.key,
+    def agent_run(self, url, goal, steps=20, secs=120, poll=3.0):
+        """Async run (/run-async) + poll GET /v1/runs/{id}. Returns the result only for a COMPLETED run, else None."""
+        st, js = http("POST", AGENT_URL + "/v1/automation/run-async", self.key,
                       {"url": url, "goal": goal, "agent_config": {"max_steps": steps, "max_duration_seconds": secs}},
-                      timeout=secs + 60, retries=2)
+                      timeout=60, retries=3)
         self._fatal(st, js, "agent")
+        run_id = js.get("run_id") if st == 200 else None
+        if not run_id:
+            return None
         with self._lock:
             self.stats["agent"] += 1
-        return js.get("result") if st == 200 and js.get("status", "COMPLETED") == "COMPLETED" else None
+        deadline = time.time() + secs + 120
+        while time.time() < deadline and not ABORT.is_set():
+            st, js = http("GET", AGENT_URL + f"/v1/runs/{run_id}", self.key, timeout=30, retries=3)
+            self._fatal(st, js, "agent")
+            status = js.get("status") if st == 200 else None
+            if status == "COMPLETED":
+                return js.get("result")
+            if status in ("FAILED", "CANCELLED"):
+                return None
+            time.sleep(poll)
+        http("POST", AGENT_URL + f"/v1/runs/{run_id}/cancel", self.key, timeout=30, retries=1)
+        return None
 
     def ds(self, method, path, body=None, params=None):
         st, js = http(method, AGENT_URL + path, self.key, body, params, timeout=90)
@@ -855,11 +870,19 @@ TS_COLS = [
 ]
 
 
+TS_DESC_MAX = 1900  # TinySet rejects long descriptions (2049 chars -> INVALID_INPUT; 400 ok); stay under 2000
+TS_PREAMBLE = ("One row per entity in the FIXED list below; entity = the exact name before '::'. "
+               "Do not add or substitute entities. Check live pages for whether each is still active. Leave cells empty rather than guess.\n")
+
+
+def ts_line(n, u):
+    host = re.sub(r"^https?://(www\.)?", "", u or "").split("/")[0] if u else ""
+    return f"- {n[:50]} :: {host or '(no site)'}"
+
+
 def ts_spec(batch):
-    lines = "\n".join(f"- {n} :: {u or '(no website known)'}" for n, u in batch)
-    desc = ("One row per organisation or product in the FIXED list below, using exactly the name before '::' as the entity. "
-            "Do NOT add, discover or substitute any organisation that is not in this list. For each, check on live pages whether it is still active. "
-            "Leave a cell empty rather than guessing.\n" + lines)
+    desc = TS_PREAMBLE + "\n".join(ts_line(n, u) for n, u in batch)
+    assert len(desc) <= TS_DESC_MAX + 100, f"TinySet description too long ({len(desc)}); batch by budget via new_batches(items=...)"
     cols = []
     for name, typ, pk, hint, fmt in TS_COLS:
         c = {"name": name, "label": name.replace("_", " ").title(), "type": typ, "is_primary_key": pk, "retrieval_hint": hint}
@@ -869,22 +892,121 @@ def ts_spec(batch):
     return {"name": "zombiecheck batch", "description": desc, "columns": cols}
 
 
-def run_tinyset(tf, db, items, args):
+TS_COST_PER_ROW = 0.10
+
+
+def ts_select(det, items, today, budget):
+    """Rows phase 1 could not settle, best candidates first, capped at `budget`.
+    Priority: site blocked, live with no dated activity, confidence low, confidence medium.
+    Returns (chosen, skip) where skip = {idx: 'skipped_resolved' | 'skipped_budget'} for every other row."""
+    ranked = []
+    for i, s in det.items():
+        if s.get("site_state") == "blocked":
+            p = 0
+        elif s.get("site_state") == "live" and not any(s.get(k) for k in ("update", "release", "news", "social")):
+            p = 1
+        else:
+            conf = decide(s, None, today)[2]
+            p = {"low": 2, "medium": 3}.get(conf)
+        if p is not None:
+            ranked.append((p, i))
+    ranked.sort()
+    order = [i for _, i in ranked]
+    chosen = order[:max(0, budget)]
+    cset = set(chosen)
+    skip = {i: ("skipped_budget" if i in order else "skipped_resolved") for i in det if i not in cset}
+    return chosen, skip
+
+
+TS_VALIDATE_SEED = 20261115
+
+
+def ts_validate_sample(skip, n):
+    """Seeded random sample of rows phase 1 resolved with high confidence; same input -> same rows on every re-run."""
+    pool = sorted(i for i, v in skip.items() if v == "skipped_resolved")
+    return sorted(random.Random(TS_VALIDATE_SEED).sample(pool, min(max(0, n), len(pool))))
+
+
+def verdict_side(v):
+    return {"alive": "A", "zombie": "Z"}.get(v)  # 'slowing down' (None) agrees with either side
+
+
+def ts_crosscheck(pairs):
+    """pairs: [(fetch_search_verdict, tinyset_verdict_or_None)] for the sampled rows.
+    -> (agree, answered, sampled). A row with no TinySet answer counts in `sampled` but never as agreeing."""
+    agree = answered = 0
+    for fs, tsv in pairs:
+        if tsv is None:
+            continue
+        answered += 1
+        a, b = verdict_side(fs), verdict_side(tsv)
+        if a is None or b is None or a == b:
+            agree += 1
+    return agree, answered, len(pairs)
+
+
+def ts_dict(ts_claims, vv):
+    """TinySet claims + our live re-verification -> the `ts` argument of decide()."""
+    return {"update": vv.get("update"), "social": vv.get("social"),
+            "operating": ts_claims.get("still_operating"), "note": str(ts_claims.get("status_note") or ""),
+            "jobs": ts_claims.get("open_jobs") if isinstance(ts_claims.get("open_jobs"), (int, float)) else None,
+            "signup": ts_claims.get("signup_open")}
+
+
+def ts_confirm(n_rows, assume_yes, stream_in=None, n_validate=0):
+    """Print the row count and estimated cost; ask unless --yes. Non-interactive without --yes means no."""
+    extra = f" (including {n_validate} cross-check sample rows)" if n_validate else ""
+    print(f"TinySet: {n_rows} rows{extra} x ${TS_COST_PER_ROW:.2f} = estimated ${n_rows * TS_COST_PER_ROW:.2f}", file=sys.stderr)
+    if assume_yes:
+        return True
+    stream_in = stream_in or sys.stdin
+    if not stream_in.isatty():
+        print("TinySet skipped: confirmation needed. Re-run with --yes to approve this spend.", file=sys.stderr)
+        return False
+    print("Proceed with TinySet? [y/N] ", end="", file=sys.stderr, flush=True)
+    return stream_in.readline().strip().lower() in ("y", "yes")
+
+
+def new_batches(db, idxs, size, items=None):
+    """Batch every row index not already in some batch, so a later run with a different --limit (or after a partial run) covers all rows."""
+    seen = set()
+    for (j,) in db.q("SELECT idxs FROM batches"):
+        seen.update(json.loads(j))
+    todo = [i for i in idxs if i not in seen]
+    mx = db.q("SELECT MAX(no) FROM batches")[0][0]
+    nxt = 0 if mx is None else mx + 1
+    groups, cur, used = [], [], len(TS_PREAMBLE)
+    for i in todo:  # close a batch at `size` rows or when the TinySet description would exceed its length limit
+        cost = len(ts_line(*items[i])) + 1 if items else 0
+        if cur and (len(cur) >= size or used + cost > TS_DESC_MAX):
+            groups.append(cur); cur, used = [], len(TS_PREAMBLE)
+        cur.append(i); used += cost
+    if cur:
+        groups.append(cur)
+    for g in groups:
+        db.q("INSERT INTO batches(no,idxs,status) VALUES(?,?,?)", (nxt, json.dumps(g), "new"), True)
+        nxt += 1
+
+
+def run_tinyset(tf, db, items, args, idxs=None):
     """items: {idx:(name,url)}. Creates batches (<=250 rows, default 30), keeps <=3 runs in flight, resumes by dataset id."""
-    if not db.q("SELECT 1 FROM batches LIMIT 1"):
-        idxs = sorted(items)
-        for no, i in enumerate(range(0, len(idxs), args.ts_batch)):
-            db.q("INSERT INTO batches(no,idxs,status) VALUES(?,?,?)", (no, json.dumps(idxs[i:i + args.ts_batch]), "new"), True)
+    new_batches(db, sorted(items if idxs is None else idxs), args.ts_batch, items)
+    ts_stop = threading.Event()
 
     def work(no):
         _, idxs_j, ds_id, status, data_j, note = db.q("SELECT * FROM batches WHERE no=?", (no,))[0]
         idxs = json.loads(idxs_j)
-        if status == "collected" or status == "no_credits":
+        if status == "collected" or status == "no_credits" or ts_stop.is_set():
             return
         try:
             if not ds_id:
                 spec = ts_spec([items[i] for i in idxs])
                 st, js = tf.ds("POST", "/v1/datasets", {"spec": spec, "target_rows": len(idxs), "populate": True})
+                if st == 403:
+                    print("TinySet needs a personal API key, not an org key", file=sys.stderr)
+                    db.q("UPDATE batches SET status='failed',note=? WHERE no=?", ("create http 403: personal API key needed", no), True)
+                    ts_stop.set()
+                    return
                 if st == 402:
                     db.q("UPDATE batches SET status='no_credits',note=? WHERE no=?", ("TinySet: insufficient credits", no), True)
                     return
@@ -1031,19 +1153,18 @@ ZC = ["zc_verdict", "zc_confidence", "zc_score", "zc_last_activity_date", "zc_la
       "zc_tinyset", "zc_signals_checked", "zc_checked_at"]
 
 
-def build_row(i, sig, ts_claims, ver, today, mode):
+def build_row(i, sig, ts_claims, ver, today, mode, ts_skip=None):
     """ver = {'v': {...verified claims}, 'e': [evidence]} or None"""
     ts = None
     ts_flag = "not_run"
     vv = ver["v"] if ver else {}
     if ts_claims is not None:
         ts_flag = "matched"
-        ts = {"update": vv.get("update"), "social": vv.get("social"),
-              "operating": ts_claims.get("still_operating"), "note": str(ts_claims.get("status_note") or ""),
-              "jobs": ts_claims.get("open_jobs") if isinstance(ts_claims.get("open_jobs"), (int, float)) else None,
-              "signup": ts_claims.get("signup_open")}
+        ts = ts_dict(ts_claims, vv)
     elif ver is not None:
         ts_flag = "unmatched"
+    elif ts_skip:
+        ts_flag = ts_skip
     v, score, conf, reason, last, last_sig = decide(sig, ts, today, mode)
     evid = list(sig.get("evidence", [])) + (ver["e"] if ver else [])
     evid = [e for e in evid if e["url"]]
@@ -1155,11 +1276,14 @@ def main(argv=None):
     ap.add_argument("--fetch-per-min", type=int, default=150), ap.add_argument("--search-per-min", type=int, default=30)
     ap.add_argument("--no-search", action="store_true", help="skip Search API (news/social/URL resolution)")
     ap.add_argument("--no-tinyset", action="store_true")
+    ap.add_argument("--ts-max-rows", type=int, default=120, metavar="N", help="max rows sent to TinySet (only rows phase 1 could not settle; $0.10/row)")
+    ap.add_argument("--ts-validate", type=int, default=30, metavar="N", help="also send a seeded random sample of N high-confidence rows to TinySet and report how often it agrees ($0.10/row)")
+    ap.add_argument("--yes", action="store_true", help="do not ask before spending on TinySet")
     ap.add_argument("--ts-batch", type=int, default=30, help="rows per TinySet dataset (<=250)")
     ap.add_argument("--ts-concurrency", type=int, default=3, help="TinySet runs in flight (account limit 3)")
     ap.add_argument("--ts-poll", type=int, default=20), ap.add_argument("--ts-timeout", type=int, default=2400)
     ap.add_argument("--agent-budget", type=int, default=50, metavar="N", help="max rows escalated to an Agent browser run (blocked / undated sites). 0 = off")
-    ap.add_argument("--agent-concurrency", type=int, default=4)
+    ap.add_argument("--agent-concurrency", type=int, default=2)
     ap.add_argument("--limit", type=int, help="only the first N rows (testing)")
     ap.add_argument("--print-tinyset-spec", action="store_true")
     ap.add_argument("--fresh", action="store_true", help="ignore saved state")
@@ -1193,9 +1317,6 @@ def main(argv=None):
     print(f"{len(rows)} rows | name='{header[ni]}' url='{header[ui] if ui is not None else None}' | mode={a.mode} | state {sdir}", file=sys.stderr)
 
     use_ts = not a.no_tinyset and a.mode == "companies"
-    ts_thread = threading.Thread(target=run_tinyset, args=(tf, db, items, a), daemon=True) if use_ts else None
-    if ts_thread:
-        ts_thread.start()
 
     det = db.get_all("det")
     todo = [i for i in items if i not in det]
@@ -1260,13 +1381,29 @@ def main(argv=None):
             list(ex.map(ag, cand))
         det = db.get_all("det")
 
-    if ts_thread and not ABORT.is_set():
-        print("phase 2: waiting for TinySet batches ...", file=sys.stderr)
-        while ts_thread.is_alive():
-            ts_thread.join(30)
-            b = db.q("SELECT status,COUNT(*) FROM batches GROUP BY status")
-            print("  TinySet batches:", dict(b), file=sys.stderr)
-            write_partial(a, out_path, header, rows, db, today)
+    if use_ts and not ABORT.is_set():
+        chosen, skip = ts_select(det, items, today, a.ts_max_rows)
+        sample = ts_validate_sample(skip, a.ts_validate)
+        for i in sample:
+            skip.pop(i)
+        db.meta("ts_skip", json.dumps(skip))
+        db.meta("ts_validate", json.dumps(sample))
+        chosen = chosen + sample
+        already = {i for (j,) in db.q("SELECT idxs FROM batches") for i in json.loads(j)}
+        new_rows = [i for i in chosen if i not in already]
+        print(f"phase 2: TinySet on {len(chosen) - len(sample)} unresolved rows (budget {a.ts_max_rows}) + {len(sample)} cross-check sample; "
+              f"{sum(v == 'skipped_resolved' for v in skip.values())} more resolved by phase 1, "
+              f"{sum(v == 'skipped_budget' for v in skip.values())} unresolved but over budget", file=sys.stderr)
+        if (not new_rows and not already) or (new_rows and not ts_confirm(len(new_rows), a.yes, n_validate=len([i for i in sample if i in new_rows]))):
+            chosen = []
+        if chosen:
+            ts_thread = threading.Thread(target=run_tinyset, args=(tf, db, items, a, chosen), daemon=True)
+            ts_thread.start()
+            while ts_thread.is_alive():
+                ts_thread.join(30)
+                b = db.q("SELECT status,COUNT(*) FROM batches GROUP BY status")
+                print("  TinySet batches:", dict(b), file=sys.stderr)
+                write_partial(a, out_path, header, rows, db, today)
 
     # phase 3: verify TinySet claims live, final verdicts
     claims = ts_collect(db, items) if use_ts else {}
@@ -1297,8 +1434,9 @@ def write_partial(a, out_path, header, rows, db, today, final=False):
         names = {i: (rows[i][ni].strip() if ni < len(rows[i]) else "", "") for i in range(len(rows))}
         claims = ts_collect(db, names) if db.q("SELECT 1 FROM batches WHERE data IS NOT NULL") else {}
     results = {}
+    skip = json.loads(db.meta("ts_skip") or "{}") if a.mode == "companies" and not a.no_tinyset else {}
     for i, sig in det.items():
-        results[i] = build_row(i, sig, claims.get(i) if (final or i in ver) else None, ver.get(i), today, a.mode)
+        results[i] = build_row(i, sig, claims.get(i) if (final or i in ver) else None, ver.get(i), today, a.mode, skip.get(str(i)))
     write_csv(out_path, header, rows, results)
     if final:
         ni, ui = detect_cols(header, rows, a.name_col, a.url_col)
@@ -1307,6 +1445,21 @@ def write_partial(a, out_path, header, rows, db, today, final=False):
         from collections import Counter
         c = Counter(r["zc_verdict"] for r in results.values())
         lines = [f"# Zombie Check summary\n", f"rows: {len(rows)}  checked: {len(results)}\n"] + [f"- {k}: {n}" for k, n in c.most_common()]
+        sample = json.loads(db.meta("ts_validate") or "[]")
+        if sample:
+            pairs = []
+            for i in sample:
+                if i not in det:
+                    continue
+                fs = decide(det[i], None, today, a.mode)[0]
+                cl = claims.get(i)
+                tsv = decide({"site_state": "live", "flags": [], "evidence": [], "reason_bits": [], "jobs": None, "signup": None,
+                              "update": None, "release": None, "news": None, "social": None},
+                             ts_dict(cl, (ver.get(i) or {}).get("v", {})), today, a.mode)[0] if cl is not None else None
+                pairs.append((fs, tsv))
+            agree, answered, n = ts_crosscheck(pairs)
+            lines += ["", f"TinySet cross-check: {agree} of {n} sampled rows agree with the Fetch/Search verdict"
+                          f" ({n - answered} had no TinySet answer; 'slowing down' counts as agreeing with either side)"]
         open(out_path + ".summary.md", "w").write("\n".join(lines) + "\n")
         print("\n".join(lines), file=sys.stderr)
 

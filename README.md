@@ -32,12 +32,20 @@ boilerplate removed. Unlinked conventional paths (`/blog`, `/changelog`, `/caree
 The same URL in many rows is fetched once per run (in-memory only; nothing is read from an earlier run).
 
 ## How TinySet is used
+TinySet is the **gap-filler for rows phase 1 (Fetch + Search + Agent) could not settle**. It is not run on every row.
+After phase 1, rows are ranked: site blocked, then live with no dated activity, then low confidence, then medium confidence.
+At most `--ts-max-rows N` (default 120) of them go to TinySet. Before it starts, the tool prints the row count and the estimated cost
+(rows x $0.10) and asks for confirmation; `--yes` skips the question (a non-interactive run without `--yes` skips TinySet).
+`zc_tinyset` says what happened to each row: `matched` / `unmatched` (sent), `skipped_resolved` (phase 1 was already high confidence),
+`skipped_budget` (unresolved but over the budget), `not_run` (TinySet off or declined).
+
 TinySet fills a table from the live web and ties each value to a page the agent opened. It has no "enrich my rows" input,
-so each batch (default 30 rows, 3 runs in flight = the account limit) is created with an explicit `spec`
-whose description is a **fixed entity list** (`name :: website`) and `target_rows = batch size`. 8 columns:
+so each batch (up to 30 rows, 3 runs in flight = the account limit) is created with an explicit `spec`
+whose description is a **fixed entity list** (`name :: domain`) and `target_rows = batch size`. The description must stay under TinySet's
+length limit, so batches are also closed by description length (~1,900 chars). Columns:
 `still_operating, status_note, latest_update_date, latest_social_date, open_jobs, signup_open, evidence_urls`.
 Rows it returns are matched back by name; anything not in the list (hallucinated) is dropped.
-TinySet is the *second opinion and gap filler* (social posts we cannot scrape, JS-rendered careers pages), never the sole judge:
+It is a *second opinion*, never the sole judge:
 every date it claims is **re-fetched live from the page it cites**. Confirmed = full weight; page live but date not visible = used only if
 we found nothing ourselves; unreachable (X/LinkedIn bot walls) = half weight, flagged "not independently verified".
 
@@ -60,10 +68,10 @@ signal expandable with links) and `<output>.summary.md`.
 
 ## Cost / limits (from the docs)
 Fetch is free up to 1,000 URLs/day; this tool uses ~6 per row, so 500 rows needs wallet balance (or run ~150 rows/day free). Search free to 12,000/day.
-TinySet runs take 5-20 min each; 500 rows = 17 batches ~ 1.5-2 h at 3 in flight. Use `--no-tinyset` for a fast Fetch+Search-only pass.
+TinySet is billed per row (about $0.10, the rate shown in the wallet) and only runs on unresolved rows, capped by `--ts-max-rows` (default 120 = about $12 at most). Runs take 5-20 min per batch. Use `--no-tinyset` for a Fetch+Search-only pass.
 
 ## Tested vs not tested
-Tested: 17 unit tests on the deterministic core (`python3 -m unittest tests/test_core.py`), full pipeline, resume after SIGKILL, job mode, 540-row run against `tests/mock_tinyfish.py` (a local fake of the four APIs + a fake web).
+Tested: 26 unit tests on the deterministic core (`python3 -m unittest tests/test_core.py`), full pipeline, resume after SIGKILL, job mode, 540-row run against `tests/mock_tinyfish.py` (a local fake of the four APIs + a fake web).
 **Not tested against live TinyFish** (no key/network in the build sandbox). Assumptions to check on first run: the TinySet `spec` honours a fixed
 entity list in `description` (`--print-tinyset-spec` shows it; `zc_tinyset=unmatched` flags rows it did not return), and Fetch `format=html` returns raw page HTML in `text`.
 Known weak spots: social recency (X/LinkedIn are bot-walled), JS-only careers pages, `<time>`-less blogs fall back to text dates.

@@ -1,0 +1,6 @@
+.env
+live30/
+demo/
+__pycache__/
+live30*/
+list.csv

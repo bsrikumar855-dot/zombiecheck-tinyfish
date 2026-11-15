@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 T = date.today()
 DS = {}
+RUNS = {}
 
 def d(days): return (T - timedelta(days=days)).isoformat()
 
@@ -74,15 +75,20 @@ class H(BaseHTTPRequestHandler):
             ents = re.findall(r"^- (.+?) :: (.*)$", b["spec"]["description"], re.M)
             did = str(uuid.uuid4()); DS[did] = {"ents": ents, "polls": 0, "spec": b["spec"]}
             return self.send(202, {"id": did, "status": "populating", "run": {"id": "r", "status": "running"}})
-        if u.path == "/v1/automation/run":
-            host = urlparse(b["url"]).netloc
-            return self.send(200, {"status": "COMPLETED", "result": {"operating": True, "status_note": "active", "latest_item_date": d(15),
-                "latest_item_url": f"https://{host}/news/latest", "open_roles": 4, "careers_url": f"https://{host}/careers", "signup_available": True}})
+        if u.path == "/v1/automation/run-async":
+            rid = str(uuid.uuid4()); RUNS[rid] = {"host": urlparse(b["url"]).netloc, "polls": 0}
+            return self.send(200, {"run_id": rid, "error": None})
         self.send(404, {})
     def do_GET(self):
         u = urlparse(self.path); q = {k: v[0] for k, v in parse_qs(u.query).items()}
         if u.path == "/":
             return self.send(200, {"results": [{"title": "t", "snippet": "s", "url": "https://x.example/n", "date": d(40)}]})
+        rm = re.match(r"/v1/runs/([\w-]+)$", u.path)
+        if rm and rm.group(1) in RUNS:
+            r = RUNS[rm.group(1)]; r["polls"] += 1; host = r["host"]
+            if r["polls"] < 2: return self.send(200, {"run_id": rm.group(1), "status": "RUNNING"})
+            return self.send(200, {"run_id": rm.group(1), "status": "COMPLETED", "result": {"operating": True, "status_note": "active", "latest_item_date": d(15),
+                "latest_item_url": f"https://{host}/news/latest", "open_roles": 4, "careers_url": f"https://{host}/careers", "signup_available": True}})
         m = re.match(r"/v1/datasets/([\w-]+)(/rows)?$", u.path)
         if m and m.group(1) in DS:
             ds = DS[m.group(1)]
