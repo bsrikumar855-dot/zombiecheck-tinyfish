@@ -26,7 +26,7 @@ The first pass gave 181 zombies out of 600, which is too many for a maintained l
 
 - **Wrong:** Codeac.io (flagged "shut down" because a TLS note said "End of Life"), timezone.io (its page says a *different* service, WorldTimeAPI, shut down), NASdisks, instatus.com (live products with no dated pages or a stale sitemap/text date), Azure App Service (blog dates written "November 5" with no year), Calendarific.
 - **Unsupported:** about 117 of the 181 zombies were live sites with no dated page, scored as dead only because nothing was dated.
-- **Held up:** Reducto and Zoho Sign (alive, dated posts on the page), pyup.io, RequestBin, Dependabot, Keybase (dead or folded into an acquirer).
+- **Held up:** Reducto and Zoho Sign (alive, dated posts on the page), pyup.io, RequestBin, Dependabot, Keybase (dead or folded into an acquirer; under the later redirect-corroboration rule the three redirects are `unclear`, because no news result confirmed the acquisition).
 
 Fixes: a shutdown phrase now counts only if it is about the site itself (first person, or its own brand in the same sentence), and "end of life" alone no longer counts; missing dates are treated as unknown rather than zero (live site with no dated activity anywhere becomes `unclear`); a live site whose newest dated item is under 2 years old is at most "slowing down"; a blocked site is never zombie without proof; a redirect to a sibling domain (sonarcloud.io to sonarsource.com, v0.dev to v0.app) is a move, not an acquisition. 9 new unit tests.
 Final rule (all 600 verdicts recomputed from saved state, no new network or TinySet calls):
