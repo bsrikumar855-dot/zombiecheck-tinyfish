@@ -198,7 +198,7 @@ def mkdate(y, m, d):
 
 
 def valid(d, today):
-    return d if d and date(2005, 1, 1) <= d <= today + timedelta(days=1) else None
+    return d if d and date(2010, 1, 1) <= d <= today + timedelta(days=1) else None
 
 
 def find_dates(text, today):
@@ -454,7 +454,8 @@ def analyze_site(tf, name, url, today, do_search=True):
             toks = brand_tokens(name, base)
             tgt = reg_domain(fh).split(".")[0]
             sib = any(len(t) >= 4 and len(os.path.commonprefix([t, tgt])) >= 4 for t in toks)  # sonarcloud.io -> sonarsource.com
-            if sib or any(t in head.lower() for t in toks):
+            low_text = text.lower()  # the WHOLE final page, not just the head: 'Logtail is now Better Stack' can sit far down
+            if sib or any(t in low_text for t in toks) or any(t in head.lower() for t in toks):
                 flags.append(f"moved_to:{reg_domain(fh)}")
                 out["reason_bits"].append(f"moved to {reg_domain(fh)} (brand still present: rebrand/migration)")
             else:
@@ -704,6 +705,7 @@ def apply_agent(s, res, today):
         E.append(ev("update_agent", d, url, "agent opened the page and read the newest item date"))
     if res.get("operating") is False and re.search(r"(shut|acquired|parked|closed|discontinued)", note, re.I):
         s["site_state"] = "shutdown"
+        flags.append("agent_reported_shutdown")
         s.setdefault("reason_bits", []).append(f"agent browser reports: {note}")
         E.append(ev("status_agent", None, s.get("final_url") or url, f"agent: {note}"))
     if s.get("jobs") is None and isinstance(res.get("open_roles"), (int, float)) and str(res.get("careers_url") or "").startswith("http"):
@@ -720,10 +722,57 @@ def days_since(iso, today):
     return (today - date.fromisoformat(iso)).days if iso else None
 
 
+OWN_SOURCES = ("blog", "changelog", "sitemap", "feed", "release", "commit")
+STRUCTURED_SOURCES = ("sitemap", "feed", "release", "commit")
+MIN_VALID_DATE = "2010-01-01"
+
+
+def on_own_domain(url, sig):
+    """True only for the organisation's own registered domain(s) or its own GitHub repo. Never dev.to, x.com, youtube, linkedin..."""
+    host = urllib.parse.urlparse(url or "").netloc.lower()
+    if not host:
+        return False
+    own = sig.get("own_domains") or [reg_domain(urllib.parse.urlparse(sig.get("final_url") or "").netloc)]
+    repo = (sig.get("own_repo") or "").lower()
+    if reg_domain(host) == "github.com":
+        return bool(repo) and urllib.parse.urlparse(url).path.lower().strip("/").startswith(repo)
+    return reg_domain(host) in [d for d in own if d and d != "github.com"]
+
+
+def stale_proof(sig, today, jobs, signup):
+    """Evidence that a live site is stale. Needs: (a) every dated own-domain source older than 730 days, and either two independent
+    structured sources or one plus zero open jobs and a non-working sign-up; (b) no open jobs; (c) evidence on the organisation's
+    own domain / own GitHub repo; (d) dates from structured markup or a feed, not text-parsed visible text; dates before 2010 are invalid.
+    Returns (proof_entries or None, note)."""
+    if jobs and jobs > 0:
+        return None, "open jobs found"
+    own, structured = [], []
+    for e in sig.get("evidence", []):
+        if e.get("signal") not in OWN_SOURCES or not e.get("date") or e["date"] < MIN_VALID_DATE:
+            continue
+        if not on_own_domain(e.get("url"), sig):
+            continue
+        age = days_since(e["date"], today)
+        own.append(age)
+        if e["signal"] in STRUCTURED_SOURCES or "(structured)" in (e.get("basis") or "") or "dated entries" in (e.get("basis") or ""):
+            structured.append((age, e))
+    if not own:
+        return None, "no own-domain dated source"
+    if min(own) <= 730:
+        return None, "an own-domain dated source is within 730 days"
+    urls = {e["url"] for _, e in structured}
+    if len(urls) >= 2 or (len(urls) == 1 and jobs == 0 and signup in ("broken", "closed")):
+        return [e for _, e in sorted(structured, key=lambda t: t[0])], ""
+    if not structured:
+        return None, "own-domain dates come only from text-parsed visible text"
+    return None, "only one structured own-domain source, with no corroboration (needs a second source, or zero jobs and sign-up not working)"
+
+
 def decide(sig, ts, today, mode="companies"):
     """sig: analyze_*() output; ts: {'update':(iso,status),'social':(iso,status),'jobs':n,'signup':bool,'operating':bool,'note':str} or None.
     Returns verdict, score, confidence, reason, last_date, last_signal."""
     ts = ts or {}
+    sig = {**sig, **{k: None for k in ("update", "release", "news", "social", "agent_update") if sig.get(k) and sig[k] < MIN_VALID_DATE}}
     bits = list(sig.get("reason_bits", []))
     cands = []  # (iso, signal, weight)
     for k in ("update", "release", "news"):
@@ -772,10 +821,18 @@ def decide(sig, ts, today, mode="companies"):
         bits.append(f"posted {age}d ago" if age is not None else "no posting date on page")
         return (v, score, conf, "; ".join(bits), sig.get("update") or "", "job_page")
 
+    if state == "shutdown" and "shutdown_notice" not in sig.get("flags", []):
+        # claimed by TinySet/Agent, but the organisation's own site did not show shutdown wording
+        return ("unclear", 20, "low", "; ".join(["shutdown claimed, not confirmed on own site"] + [b_ for b_ in bits if "reports" not in b_ and "shut" not in b_]), overall, last_sig)
+    if state == "dead" and "fetch_invalid_url" in sig.get("flags", []) and not any(f in sig.get("flags", []) for f in ("fetch_target_unreachable", "fetch_page_not_found")):
+        # the fetch API rejected the URL (invalid_url): that is not a 404/410 or a DNS failure, so it is not proof of closure
+        return ("unclear", 20, "low", "fetch API rejected the URL (invalid_url); not proof of closure", overall, last_sig)
     if state in ("dead", "parked", "absorbed", "shutdown", "archived"):
         # a TinySet note saying "rebranded to X" with a live verified update still gets a chance at not being a zombie
         return ("zombie", 0, "high" if state != "dead" else "medium", "; ".join(bits) or state, overall, last_sig if overall else "")
     if ts.get("operating") is False and ts.get("note") and re.search(r"(shut|acquired|parked|closed)", ts["note"], re.I) and not (last_iso and days_since(last_iso, today) <= 120):
+        if "shutdown_notice" not in sig.get("flags", []):
+            return ("unclear", 20, "low", "; ".join(["shutdown claimed, not confirmed on own site", f"TinySet note: {ts['note']}"]), overall, last_sig)
         bits.append(f"TinySet reports: {ts['note']}")
         return ("zombie", 5, "medium", "; ".join(bits), overall, last_sig)
 
@@ -820,10 +877,8 @@ def decide(sig, ts, today, mode="companies"):
     elif state == "blocked":
         bits.append("site blocked automated fetch (unverified)")
     score = round(100 * pts / den) if den else 0
-    # "positive evidence of staleness" = a dated signal from the organisation's OWN pages (blog, changelog, release/commit feed,
-    # sitemap/feed lastmod, Agent-read page). Social and third-party news dates may move the score but never make a zombie.
-    own = [days_since(sig[k], today) for k in ("update", "release", "agent_update") if sig.get(k)]
-    own_newest = min(own) if own else None
+    # Social and third-party news dates never make a zombie. A stale-date zombie needs corroborated, structured,
+    # own-domain dated sources (see stale_proof); everything else is at most "slowing down".
     any_dated = a is not None or s is not None  # own pages, news, TinySet dates or social: any dated signal at all
     newest_all = min(x for x in (a, s) if x is not None) if any_dated else None
     NO_DATES = "no dated activity found; not evidence of closure"
@@ -831,16 +886,17 @@ def decide(sig, ts, today, mode="companies"):
     if not any_dated and not (n and n > 0) and state in ("live", "blocked"):
         # nothing dated anywhere: absence of dates is not evidence of closure
         return ("unclear", min(score, 45), "low", "; ".join([NO_DATES] + rest), overall, last_sig)
-    if own_newest is not None and own_newest > 730 and newest_all > 730 and not (n and n > 0):
+    proof, why_not = stale_proof(sig, today, n, su)
+    if proof and newest_all is not None and newest_all > 730:
         score = min(score, 25)
-        bits.append(f"newest dated signal on its own pages is {own_newest} days old (over 730)")
+        bits.append(f"{len(proof)} structured own-domain source(s), newest {proof[0]['date']} on {proof[0]['url']} ({days_since(proof[0]['date'], today)} days, over 730)")
     v = "alive" if score >= 60 else "slowing down" if score >= 30 else "zombie"
-    if v == "zombie" and not (own_newest is not None and own_newest > 730):
-        # not a hard gate (those returned above) and no own-page dated signal older than 730 days: cannot call it a zombie
+    if v == "zombie" and not proof:
+        # not a hard gate (those returned above) and no corroborated own-domain staleness: cannot call it a zombie
         if not any_dated:
             return ("unclear", min(score, 45), "low", "; ".join([NO_DATES] + rest), overall, last_sig)
         v = "slowing down"
-        bits.append("no own-page dated signal over 730 days old (social/news dates alone never make a zombie)")
+        bits.append(f"not enough to call it a zombie: {why_not}")
     if v == "zombie" and any(f.startswith("moved_to:") for f in sig.get("flags", [])):
         v = "unclear"  # same brand lives on at a new domain; the old domain's stale dates prove nothing
         bits.append("brand continues at its new domain")
@@ -1190,7 +1246,23 @@ ZC = ["zc_verdict", "zc_confidence", "zc_score", "zc_last_activity_date", "zc_la
       "zc_tinyset", "zc_signals_checked", "zc_checked_at"]
 
 
-def build_row(i, sig, ts_claims, ver, today, mode, ts_skip=None):
+def own_info(row_url, sig):
+    u = norm_url(row_url or "")
+    host = urllib.parse.urlparse(u).netloc.lower()
+    doms = [d for d in {reg_domain(host), reg_domain(urllib.parse.urlparse(sig.get("final_url") or "").netloc)} if d]
+    repo = ""
+    if reg_domain(host) == "github.com":
+        parts = [p for p in urllib.parse.urlparse(u).path.split("/") if p]
+        repo = "/".join(parts[:2]).lower() if len(parts) >= 2 else ""
+    for f in sig.get("flags", []):  # a rebrand/move keeps both domains as 'own'
+        if f.startswith("moved_to:"):
+            doms.append(f.split(":", 1)[1])
+    return {**sig, "own_domains": doms, "own_repo": repo}
+
+
+def build_row(i, sig, ts_claims, ver, today, mode, ts_skip=None, row_url=None):
+    if row_url is not None:
+        sig = own_info(row_url, sig)
     """ver = {'v': {...verified claims}, 'e': [evidence]} or None"""
     ts = None
     ts_flag = "not_run"
@@ -1479,11 +1551,13 @@ def write_partial(a, out_path, header, rows, db, today, final=False):
         names = {i: (rows[i][ni].strip() if ni < len(rows[i]) else "", "") for i in range(len(rows))}
         claims = ts_collect(db, names) if db.q("SELECT 1 FROM batches WHERE data IS NOT NULL") else {}
     results = {}
+    ni, ui = detect_cols(header, rows, a.name_col, a.url_col)
     sent = {i for (j,) in db.q("SELECT idxs FROM batches WHERE status IN ('collected','partial')") for i in json.loads(j)}
     skip = json.loads(db.meta("ts_skip") or "{}") if a.mode == "companies" and not a.no_tinyset else {}
     for i, sig in det.items():
         results[i] = build_row(i, sig, claims.get(i) if (final or i in ver) else None, ver.get(i), today, a.mode,
-                               skip.get(str(i)) or ("unmatched" if final and i in sent and i not in claims else None))
+                               skip.get(str(i)) or ("unmatched" if final and i in sent and i not in claims else None),
+                               row_url=(rows[i][ui] if ui is not None and i < len(rows) and ui < len(rows[i]) else ""))
     write_csv(out_path, header, rows, results)
     if final:
         ni, ui = detect_cols(header, rows, a.name_col, a.url_col)

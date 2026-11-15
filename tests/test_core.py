@@ -20,6 +20,18 @@ def page(url, text, final=None, links=None, **kw):
     return {"url": url, "final_url": final or url, "text": text, "links": links or [], **kw}
 
 
+def own_ev(signal, age, path="/blog", basis="newest date on page (structured)", host="acme.com"):
+    return {"signal": signal, "date": D(age), "url": f"https://{host}{path}", "basis": basis}
+
+
+def stale_sig(age=800, extra=None, **kw):
+    """A live site whose own blog and sitemap are both `age` days old (structured), for the zombie rule."""
+    base = {"site_state": "live", "flags": [], "reason_bits": [], "jobs": 0, "signup": "broken", "update": D(age), "release": None,
+            "news": None, "social": None, "final_url": "https://acme.com/",
+            "evidence": [own_ev("blog", age), own_ev("sitemap", age + 5, "/sitemap.xml", "newest of 4 dated entries")] + (extra or [])}
+    return {**base, **kw}
+
+
 class Detectors(unittest.TestCase):
     def test_parked(self):
         tf = FakeTF({"https://acme.io": page("https://acme.io", "acme.io is for sale! Buy this domain on Sedo.com")})
@@ -71,6 +83,22 @@ class Detectors(unittest.TestCase):
         self.assertEqual(conf, "low")
 
 
+class RedirectRebrand(unittest.TestCase):
+    def test_brand_name_far_down_the_final_page_means_rename_not_zombie(self):
+        body = "Better Stack log management. " + "lorem ipsum " * 600 + " Logtail is now part of Better Stack."
+        tf = FakeTF({"https://logtail.com": page("https://logtail.com", body, final="https://betterstack.com/log-management")})
+        s = z.analyze_site(tf, "logtail.com", "logtail.com", T, do_search=False)
+        self.assertEqual(s["site_state"], "live")
+        self.assertTrue(any(f.startswith("moved_to:") for f in s["flags"]))
+        self.assertNotEqual(z.decide(s, None, T)[0], "zombie")
+
+    def test_redirect_to_page_that_never_mentions_the_brand_stays_a_hard_gate(self):
+        tf = FakeTF({"https://oldco.com": page("https://oldco.com", "Enterprise cloud " * 300, final="https://bigcorp.com/")})
+        s = z.analyze_site(tf, "Oldco", "oldco.com", T, do_search=False)
+        self.assertEqual(s["site_state"], "absorbed")
+        self.assertEqual(z.decide(s, None, T)[0], "zombie")
+
+
 class Verdict(unittest.TestCase):
     base = {"site_state": "live", "flags": [], "evidence": [], "reason_bits": [], "jobs": None, "signup": None,
             "update": None, "release": None, "news": None, "social": None}
@@ -79,7 +107,7 @@ class Verdict(unittest.TestCase):
 
     def test_fresh_is_alive(self): self.assertEqual(z.decide(self.sig(update=D(20), jobs=3, signup="works"), None, T)[0], "alive")
     def test_six_months_is_slowing(self): self.assertEqual(z.decide(self.sig(update=D(170), jobs=0, signup="works"), None, T)[0], "slowing down")
-    def test_three_years_is_zombie(self): self.assertEqual(z.decide(self.sig(update=D(1100), signup="works"), None, T)[0], "zombie")
+    def test_three_years_is_zombie(self): self.assertEqual(z.decide(stale_sig(1100, signup="works"), None, T)[0], "zombie")
 
     def test_unverified_tinyset_date_cannot_override_own(self):
         ts = {"update": (D(5), "page_live")}
@@ -100,6 +128,10 @@ class Verdict(unittest.TestCase):
     def test_agent_shutdown_report(self):
         s = self.sig()
         z.apply_agent(s, {"operating": False, "status_note": "shut down in 2024"}, T)
+        v, _, _, reason, *_ = z.decide(s, None, T)
+        self.assertEqual(v, "unclear")  # Agent claim alone: own site did not show shutdown wording
+        self.assertIn("shutdown claimed, not confirmed on own site", reason)
+        s["flags"].append("shutdown_notice")  # own site ALSO shows shutdown wording -> hard gate
         self.assertEqual(z.decide(s, None, T)[0], "zombie")
 
     def test_last_activity_date_matches_its_source(self):
@@ -296,7 +328,7 @@ class FalseZombieFixes(unittest.TestCase):
         self.assertNotEqual(z.decide(self.sig(site_state="blocked", social=D(250)), None, T)[0], "zombie")
 
     def test_rebrand_with_stale_old_dates_is_not_zombie(self):
-        self.assertEqual(z.decide(self.sig(update=D(1200), flags=["moved_to:currencybeacon.com"]), None, T)[0], "unclear")
+        self.assertEqual(z.decide(stale_sig(1200, flags=["moved_to:currencybeacon.com"]), None, T)[0], "unclear")
 
     def test_http_451_is_blocked_not_dead(self):
         tf = FakeTF({"https://legal.io": {"error": "target_http_error", "status": 451}})
@@ -311,15 +343,16 @@ class FalseZombieFixes(unittest.TestCase):
         self.assertTrue(reason.startswith("no dated activity found; not evidence of closure"))
         # newest dated item 729 days old: never zombie; 731 days old: zombie
         self.assertNotEqual(z.decide(self.sig(update=D(729), signup="broken"), None, T)[0], "zombie")
-        self.assertEqual(z.decide(self.sig(update=D(731), signup="broken"), None, T)[0], "zombie")
+        self.assertEqual(z.decide(stale_sig(731), None, T)[0], "zombie")
         # social is not evidence from the organisation's own pages
         self.assertNotEqual(z.decide(self.sig(social=D(800), signup="broken"), None, T)[0], "zombie")
 
     def test_each_hard_gate_is_zombie_without_any_dates(self):
-        for st in ("dead", "parked", "absorbed", "shutdown", "archived"):
+        for st in ("dead", "parked", "absorbed", "archived"):
             self.assertEqual(z.decide(self.sig(site_state=st), None, T)[0], "zombie", st)
+        self.assertEqual(z.decide(self.sig(site_state="shutdown", flags=["shutdown_notice"]), None, T)[0], "zombie")
         ts = {"operating": False, "note": "shut down"}
-        self.assertEqual(z.decide(self.sig(), ts, T)[0], "zombie")
+        self.assertEqual(z.decide(self.sig(flags=["shutdown_notice"]), ts, T)[0], "zombie")
 
     def test_never_zombie_from_a_low_score_alone(self):
         for upd in (1, 100, 300, 600, 729):
@@ -328,12 +361,12 @@ class FalseZombieFixes(unittest.TestCase):
     def test_social_only_800d_is_not_zombie(self):
         v, _, _, reason, *_ = z.decide(self.sig(social=D(800), signup="broken"), None, T)
         self.assertEqual(v, "slowing down")
-        self.assertIn("social/news dates alone never make a zombie", reason)
+        self.assertIn("not enough to call it a zombie", reason)
 
     def test_blog_800d_with_no_other_activity_is_zombie(self):
-        v, _, _, reason, *_ = z.decide(self.sig(update=D(800)), None, T)
+        v, _, _, reason, *_ = z.decide(stale_sig(800), None, T)
         self.assertEqual(v, "zombie")
-        self.assertIn("own pages is 800 days old", reason)
+        self.assertIn("structured own-domain source", reason)
 
     def test_news_only_800d_is_not_zombie(self):
         self.assertEqual(z.decide(self.sig(news=D(800)), None, T)[0], "slowing down")
@@ -344,8 +377,64 @@ class FalseZombieFixes(unittest.TestCase):
     def test_old_own_page_date_with_fresh_social_is_not_pushed_to_zombie(self):
         self.assertNotEqual(z.decide(self.sig(update=D(900), social=D(20), signup="works"), None, T)[0], "zombie")
 
+    # ---- rule 2: dates before 2010 are invalid (Active Directory 2005-09-26)
+    def test_pre_2010_date_is_ignored(self):
+        sig = stale_sig(800, update="2005-09-26", evidence=[
+            {"signal": "blog", "date": "2005-09-26", "url": "https://acme.com/blog", "basis": "newest date on page (structured)"},
+            {"signal": "sitemap", "date": "2005-09-26", "url": "https://acme.com/sitemap.xml", "basis": "newest of 2 dated entries"}])
+        self.assertNotEqual(z.decide(sig, None, T)[0], "zombie")
+
+    # ---- rule 1: corroboration, open jobs, own domain, structured
+    def test_one_stale_blog_page_plus_open_jobs_is_not_zombie(self):
+        self.assertNotEqual(z.decide(stale_sig(900, jobs=3), None, T)[0], "zombie")
+
+    def test_one_stale_structured_source_without_corroboration_is_not_zombie(self):
+        sig = stale_sig(900, signup="works", jobs=None, evidence=[own_ev("blog", 900)])
+        self.assertNotEqual(z.decide(sig, None, T)[0], "zombie")
+        proof, why = z.stale_proof(sig, T, None, "works")
+        self.assertIsNone(proof)
+        self.assertIn("only one structured own-domain source", why)
+
+    def test_one_stale_source_plus_zero_jobs_and_broken_signup_is_zombie(self):
+        sig = stale_sig(900, jobs=0, signup="broken", evidence=[own_ev("blog", 900)])
+        self.assertEqual(z.decide(sig, None, T)[0], "zombie")
+
+    def test_third_party_evidence_can_never_be_zombie_proof(self):
+        ev = [own_ev("blog", 900, "/post/1", host="dev.to"), own_ev("sitemap", 905, "/a/b", "newest of 3 dated entries", host="youtube.com"),
+              own_ev("blog", 910, "/status/1", host="x.com")]
+        self.assertNotEqual(z.decide(stale_sig(900, evidence=ev), None, T)[0], "zombie")
+
+    def test_text_parsed_dates_are_not_structured(self):
+        ev = [own_ev("blog", 900, basis="newest date on page (text)"), own_ev("changelog", 910, "/changelog", "newest date on page (text)")]
+        sig = stale_sig(900, evidence=ev)
+        v, _, _, reason, *_ = z.decide(sig, None, T)
+        self.assertNotEqual(v, "zombie")
+        self.assertIn("text-parsed", reason)
+
+    def test_own_github_repo_counts_but_other_repos_do_not(self):
+        feed = lambda repo: [{"signal": "release", "date": D(900), "url": f"https://github.com/{repo}/releases.atom", "basis": "GitHub Atom feed, newest entry"},
+                             {"signal": "commit", "date": D(905), "url": f"https://github.com/{repo}/commits.atom", "basis": "GitHub Atom feed, newest entry"}]
+        mine = {**stale_sig(900, evidence=feed("o/r")), "final_url": "https://github.com/o/r", "own_domains": ["github.com"], "own_repo": "o/r"}
+        mine["evidence"] = feed("o/r")
+        self.assertEqual(z.decide(mine, None, T)[0], "zombie")
+        other = {**mine, "evidence": feed("someone/else")}
+        self.assertNotEqual(z.decide(other, None, T)[0], "zombie")
+
+    # ---- rule 4: TinySet/Agent-reported shutdown needs the own site to say so too
+    def test_youtube_sourced_tinyset_shutdown_is_unclear(self):
+        ts = {"operating": False, "note": "shut down", "update": None, "social": None}
+        v, _, _, reason, *_ = z.decide(self.sig(), ts, T)
+        self.assertEqual(v, "unclear")
+        self.assertIn("shutdown claimed, not confirmed on own site", reason)
+
+    def test_invalid_url_fetch_error_is_not_a_dead_site(self):
+        v, _, _, reason, *_ = z.decide(self.sig(site_state="dead", flags=["fetch_invalid_url"]), None, T)
+        self.assertEqual(v, "unclear")
+        self.assertIn("invalid_url", reason)
+        self.assertEqual(z.decide(self.sig(site_state="dead", flags=["fetch_target_unreachable"]), None, T)[0], "zombie")
+
     def test_real_zombies_still_zombies(self):
-        self.assertEqual(z.decide(self.sig(update=D(1100), signup="broken"), None, T)[0], "zombie")
+        self.assertEqual(z.decide(stale_sig(1100), None, T)[0], "zombie")
         self.assertEqual(z.decide(self.sig(site_state="parked"), None, T)[0], "zombie")
 
 
