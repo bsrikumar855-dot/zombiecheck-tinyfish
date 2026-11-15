@@ -1,5 +1,6 @@
-"""Read the hand-filled zc_audit.csv and write precision per verdict into SUBMISSION.md under "Hand-check".
-Precision = rows marked y / rows checked (marked y or n), per verdict. Blank rows are not counted as checked.
+"""Read the hand-filled zc_audit.csv and write precision into SUBMISSION.md under "Hand-check".
+Precision = rows marked y / rows checked (marked y or n). Reported per verdict AND per source (free-for-dev, yc), one line per
+(source, verdict) pair; sources are NEVER pooled. Every figure is printed with its checked count (k/n). Blank rows are not counted.
 usage: python audit_precision.py [zc_audit.csv] [SUBMISSION.md] [--dry-run]"""
 import csv, re, sys, collections
 
@@ -10,29 +11,42 @@ dry = "--dry-run" in sys.argv
 BEGIN, END = "<!-- hand-check:begin -->", "<!-- hand-check:end -->"
 
 rows = list(csv.DictReader(open(audit, encoding="utf-8-sig")))
+if not rows:
+    sys.exit("zc_audit.csv has no rows")
+need = {"source", "verdict"}
+if not need <= set(rows[0].keys()):
+    sys.exit("zc_audit.csv needs a 'source' and a 'verdict' column (regenerate it with make_audit_csv.py)")
 col = next(c for c in rows[0].keys() if c.strip().lower().startswith("correct"))
-checked, right, sent = collections.Counter(), collections.Counter(), collections.Counter()
+sent, checked, right = collections.Counter(), collections.Counter(), collections.Counter()
 for r in rows:
-    v = r["verdict"]
-    sent[v] += 1
+    key = (r["source"].strip(), r["verdict"].strip())
+    sent[key] += 1
     a = (r[col] or "").strip().lower()
     if a in ("y", "yes"):
-        checked[v] += 1; right[v] += 1
+        checked[key] += 1; right[key] += 1
     elif a in ("n", "no"):
-        checked[v] += 1
+        checked[key] += 1
     elif a:
-        sys.exit(f"STOP: unrecognised answer {a!r} for {r['name']!r}; use y or n")
+        sys.exit(f"STOP: unrecognised answer {a!r} for {r['name']!r} ({key[0]}); use y or n")
 if not sum(checked.values()):
     sys.exit("No rows are marked y/n yet: nothing to report. Fill the 'correct y/n' column of " + audit + " first.")
 
-lines = [BEGIN, "Hand-check precision (a person opened each evidence URL and marked the verdict correct y/n; `zc_audit.csv`, seed 42, sampled from the saved free-for-dev results):", "",
-         "| verdict | rows sampled | rows checked | marked correct | precision |", "|---|---|---|---|---|"]
-for v in ("slowing down", "zombie"):
-    if sent[v]:
-        p = f"{100 * right[v] / checked[v]:.1f}%" if checked[v] else "n/a"
-        lines.append(f"| {v} | {sent[v]} | {checked[v]} | {right[v]} | {p} ({right[v]}/{checked[v]}) |")
-lines += ["", "Precision is correct / checked. Rows left blank are not counted. Small samples: read these as indicative, not as an accuracy rate.", END]
-block = "\n".join(lines)
+SRC_ORDER = ["free-for-dev", "yc"]
+VERDICT_ORDER = ["slowing down", "zombie", "unclear", "alive"]
+keys = sorted(sent, key=lambda k: (SRC_ORDER.index(k[0]) if k[0] in SRC_ORDER else 99, VERDICT_ORDER.index(k[1]) if k[1] in VERDICT_ORDER else 99))
+lines = ["Hand-check precision. A person opened each evidence URL and marked the verdict correct y/n (`zc_audit.csv`, seed 42, sampled from the saved results). "
+         "One line per source and verdict; sources are never pooled, and every figure shows how many rows were checked.", "",
+         "| source | verdict | rows sampled | rows checked | marked correct | precision (correct / checked) |", "|---|---|---|---|---|---|"]
+for k in keys:
+    s, v = k
+    if checked[k]:
+        p = f"{100 * right[k] / checked[k]:.1f}% ({right[k]}/{checked[k]} checked)"
+    else:
+        p = f"n/a (0 checked of {sent[k]} sampled)"
+    lines.append(f"| {s} | {v} | {sent[k]} | {checked[k]} | {right[k]} | {p} |")
+lines += ["", "Small samples: read these as indicative, not as an accuracy rate. Rows left blank are not counted. "
+          "A zombie in free-for-dev is a single row, so its figure is an anecdote, not a rate.", END]
+block = "\n".join([BEGIN] + lines)
 
 text = open(sub, encoding="utf-8", newline="").read()
 nl = "\r\n" if "\r\n" in text else "\n"
